@@ -68,6 +68,12 @@ enum Statement {
         table: String,
         where_clause: Option<WhereClause>,
     },
+    DescribeTable {
+        table: String,
+    },
+    DropTable {
+        table: String,
+    },
 }
 
 struct Database {
@@ -91,6 +97,8 @@ impl Database {
                 table,
                 where_clause,
             } => self.select_all(&table, where_clause),
+            Statement::DescribeTable { table } => self.describe_table(&table),
+            Statement::DropTable { table } => self.drop_table(&table),
         }
     }
 
@@ -200,6 +208,39 @@ impl Database {
         Ok(lines.join("\n"))
     }
 
+    fn describe_table(&self, table_name: &str) -> Result<String> {
+        let path = self.table_path(table_name)?;
+        if !path.exists() {
+            return Err(SqlRockError::new(format!(
+                "table `{table_name}` does not exist"
+            )));
+        }
+
+        let table = parse_table_file(&fs::read_to_string(path)?)?;
+        let mut lines = Vec::new();
+        lines.push("Field\tType".to_string());
+        lines.extend(
+            table
+                .columns
+                .iter()
+                .map(|column| format!("{}\t{}", column.name, column.data_type)),
+        );
+
+        Ok(lines.join("\n"))
+    }
+
+    fn drop_table(&self, table_name: &str) -> Result<String> {
+        let path = self.table_path(table_name)?;
+        if !path.exists() {
+            return Err(SqlRockError::new(format!(
+                "table `{table_name}` does not exist"
+            )));
+        }
+
+        fs::remove_file(path)?;
+        Ok(format!("dropped table `{table_name}`"))
+    }
+
     fn table_path(&self, table_name: &str) -> Result<PathBuf> {
         validate_identifier(table_name)?;
         Ok(self.root.join(format!("{table_name}.table")))
@@ -257,6 +298,8 @@ fn print_usage() {
     println!("  cargo run -- \"INSERT INTO users (id, name) VALUES (1, 'Alice');\"");
     println!("  cargo run -- \"SELECT * FROM users;\"");
     println!("  cargo run -- \"SELECT * FROM users WHERE id = 1;\"");
+    println!("  cargo run -- \"DESC users;\"");
+    println!("  cargo run -- \"DROP TABLE users;\"");
     println!("  cargo run -- --data-dir ./data \"CREATE TABLE users (id INT);\"");
 }
 
@@ -269,9 +312,13 @@ fn parse_statement(sql: &str) -> Result<Statement> {
         parse_insert_into(sql)
     } else if starts_with_keyword(sql, "select") {
         parse_select(sql)
+    } else if starts_with_keyword(sql, "desc") {
+        parse_desc(sql)
+    } else if starts_with_keyword(sql, "drop table") {
+        parse_drop_table(sql)
     } else {
         Err(SqlRockError::new(
-            "unsupported SQL statement. supported: CREATE TABLE, INSERT INTO, SELECT * FROM",
+            "unsupported SQL statement. supported: CREATE TABLE, INSERT INTO, SELECT * FROM, DESC, DROP TABLE",
         ))
     }
 }
@@ -393,6 +440,38 @@ fn parse_where_clause(sql: &str) -> Result<WhereClause> {
     Ok(WhereClause {
         column: column_name.to_string(),
         value,
+    })
+}
+
+fn parse_desc(sql: &str) -> Result<Statement> {
+    let rest = strip_keyword(sql, "desc")?.trim_start();
+    let (table_name, trailing) = split_leading_identifier(rest)?;
+    validate_identifier(table_name)?;
+    if !trailing.trim().is_empty() {
+        return Err(SqlRockError::new(format!(
+            "unexpected trailing SQL: {}",
+            trailing.trim()
+        )));
+    }
+
+    Ok(Statement::DescribeTable {
+        table: table_name.to_string(),
+    })
+}
+
+fn parse_drop_table(sql: &str) -> Result<Statement> {
+    let rest = strip_keyword(sql, "drop table")?.trim_start();
+    let (table_name, trailing) = split_leading_identifier(rest)?;
+    validate_identifier(table_name)?;
+    if !trailing.trim().is_empty() {
+        return Err(SqlRockError::new(format!(
+            "unexpected trailing SQL: {}",
+            trailing.trim()
+        )));
+    }
+
+    Ok(Statement::DropTable {
+        table: table_name.to_string(),
     })
 }
 
@@ -711,15 +790,20 @@ fn unescape_field(value: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
     fn test_dir() -> PathBuf {
+        let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         env::temp_dir().join(format!(
-            "sql_rock_test_{}",
+            "sql_rock_test_{}_{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            counter
         ))
     }
 
@@ -807,6 +891,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_desc() {
+        let statement = parse_statement("DESC users;").unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::DescribeTable {
+                table: "users".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_drop_table() {
+        let statement = parse_statement("DROP TABLE users;").unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::DropTable {
+                table: "users".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn splits_multiple_statements_with_strings() {
         let statements = split_statements(
             "INSERT INTO users (id, name) VALUES (1, 'Alice; note'); SELECT * FROM users;",
@@ -852,6 +960,35 @@ mod tests {
     }
 
     #[test]
+    fn describe_table_returns_schema() {
+        let (root, database) = setup_users_table();
+
+        let output = database
+            .execute(parse_statement("DESC users;").unwrap())
+            .unwrap();
+
+        assert_eq!(output, "Field\tType\nid\tINT\nname\tTEXT");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn drop_table_removes_table_file() {
+        let (root, database) = setup_users_table();
+
+        let output = database
+            .execute(parse_statement("DROP TABLE users;").unwrap())
+            .unwrap();
+        let select_error = database
+            .execute(parse_statement("SELECT * FROM users;").unwrap())
+            .unwrap_err();
+
+        assert_eq!(output, "dropped table `users`");
+        assert_eq!(select_error.to_string(), "table `users` does not exist");
+        assert!(!root.join("users.table").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn select_where_with_unknown_column_returns_error() {
         let (root, database) = setup_users_table();
 
@@ -882,6 +1019,30 @@ mod tests {
 
         let error = database
             .execute(parse_statement("SELECT * FROM users;").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "table `users` does not exist");
+    }
+
+    #[test]
+    fn desc_missing_table_returns_error() {
+        let root = test_dir();
+        let database = Database::new(&root);
+
+        let error = database
+            .execute(parse_statement("DESC users;").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "table `users` does not exist");
+    }
+
+    #[test]
+    fn drop_missing_table_returns_error() {
+        let root = test_dir();
+        let database = Database::new(&root);
+
+        let error = database
+            .execute(parse_statement("DROP TABLE users;").unwrap())
             .unwrap_err();
 
         assert_eq!(error.to_string(), "table `users` does not exist");
