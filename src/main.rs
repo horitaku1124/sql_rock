@@ -48,6 +48,12 @@ struct Table {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct WhereClause {
+    column: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Statement {
     CreateTable {
         name: String,
@@ -60,6 +66,7 @@ enum Statement {
     },
     SelectAll {
         table: String,
+        where_clause: Option<WhereClause>,
     },
 }
 
@@ -80,7 +87,10 @@ impl Database {
                 columns,
                 values,
             } => self.insert_into(&table, columns, values),
-            Statement::SelectAll { table } => self.select_all(&table),
+            Statement::SelectAll {
+                table,
+                where_clause,
+            } => self.select_all(&table, where_clause),
         }
     }
 
@@ -145,7 +155,7 @@ impl Database {
         Ok(format!("inserted 1 row into `{table_name}`"))
     }
 
-    fn select_all(&self, table_name: &str) -> Result<String> {
+    fn select_all(&self, table_name: &str, where_clause: Option<WhereClause>) -> Result<String> {
         let path = self.table_path(table_name)?;
         if !path.exists() {
             return Err(SqlRockError::new(format!(
@@ -154,6 +164,21 @@ impl Database {
         }
 
         let table = parse_table_file(&fs::read_to_string(path)?)?;
+        let where_index = match &where_clause {
+            Some(where_clause) => Some(
+                table
+                    .columns
+                    .iter()
+                    .position(|column| column.name.eq_ignore_ascii_case(&where_clause.column))
+                    .ok_or_else(|| {
+                        SqlRockError::new(format!(
+                            "unknown column `{}` for table `{table_name}`",
+                            where_clause.column
+                        ))
+                    })?,
+            ),
+            None => None,
+        };
         let mut lines = Vec::new();
         lines.push(
             table
@@ -163,7 +188,14 @@ impl Database {
                 .collect::<Vec<_>>()
                 .join("\t"),
         );
-        lines.extend(table.rows.iter().map(|row| row.join("\t")));
+        lines.extend(table.rows.iter().filter_map(|row| {
+            let matches = match (&where_clause, where_index) {
+                (Some(where_clause), Some(index)) => row.get(index) == Some(&where_clause.value),
+                _ => true,
+            };
+
+            matches.then(|| row.join("\t"))
+        }));
 
         Ok(lines.join("\n"))
     }
@@ -224,6 +256,7 @@ fn print_usage() {
     println!("  cargo run -- \"CREATE TABLE users (id INT, name TEXT);\"");
     println!("  cargo run -- \"INSERT INTO users (id, name) VALUES (1, 'Alice');\"");
     println!("  cargo run -- \"SELECT * FROM users;\"");
+    println!("  cargo run -- \"SELECT * FROM users WHERE id = 1;\"");
     println!("  cargo run -- --data-dir ./data \"CREATE TABLE users (id INT);\"");
 }
 
@@ -330,15 +363,36 @@ fn parse_select(sql: &str) -> Result<Statement> {
     let (table_name, trailing) = split_leading_identifier(rest)?;
     validate_identifier(table_name)?;
 
-    if !trailing.trim().is_empty() {
-        return Err(SqlRockError::new(format!(
-            "unexpected trailing SQL: {}",
-            trailing.trim()
-        )));
-    }
+    let trailing = trailing.trim_start();
+    let where_clause = if trailing.is_empty() {
+        None
+    } else {
+        Some(parse_where_clause(trailing)?)
+    };
 
     Ok(Statement::SelectAll {
         table: table_name.to_string(),
+        where_clause,
+    })
+}
+
+fn parse_where_clause(sql: &str) -> Result<WhereClause> {
+    let rest = strip_keyword(sql, "where")?.trim_start();
+    let (column_name, rest) = split_leading_identifier(rest)?;
+    validate_identifier(column_name)?;
+
+    let rest = rest.trim_start();
+    let rest = strip_keyword(rest, "=")?.trim_start();
+    if rest.is_empty() {
+        return Err(SqlRockError::new(
+            "WHERE clause requires a value: WHERE column = value",
+        ));
+    }
+
+    let value = parse_value(rest)?;
+    Ok(WhereClause {
+        column: column_name.to_string(),
+        value,
     })
 }
 
@@ -659,6 +713,33 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn test_dir() -> PathBuf {
+        env::temp_dir().join(format!(
+            "sql_rock_test_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn setup_users_table() -> (PathBuf, Database) {
+        let root = test_dir();
+        let database = Database::new(&root);
+
+        database
+            .execute(parse_statement("CREATE TABLE users (id INT, name TEXT);").unwrap())
+            .unwrap();
+        database
+            .execute(parse_statement("INSERT INTO users (id, name) VALUES (1, 'Alice');").unwrap())
+            .unwrap();
+        database
+            .execute(parse_statement("INSERT INTO users (id, name) VALUES (2, 'Bob');").unwrap())
+            .unwrap();
+
+        (root, database)
+    }
+
     #[test]
     fn parses_create_table() {
         let statement = parse_statement("CREATE TABLE users (id INT, name VARCHAR(255));").unwrap();
@@ -704,36 +785,129 @@ mod tests {
             statement,
             Statement::SelectAll {
                 table: "users".to_string(),
+                where_clause: None,
             }
         );
     }
 
     #[test]
-    fn create_table_insert_row_and_select_all() {
-        let root = env::temp_dir().join(format!(
-            "sql_rock_test_{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let database = Database::new(&root);
+    fn parses_select_with_where() {
+        let statement = parse_statement("SELECT * FROM users WHERE id = 1;").unwrap();
 
-        database
-            .execute(parse_statement("CREATE TABLE users (id INT, name TEXT);").unwrap())
-            .unwrap();
-        database
-            .execute(parse_statement("INSERT INTO users (id, name) VALUES (1, 'Alice');").unwrap())
-            .unwrap();
+        assert_eq!(
+            statement,
+            Statement::SelectAll {
+                table: "users".to_string(),
+                where_clause: Some(WhereClause {
+                    column: "id".to_string(),
+                    value: "1".to_string(),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn splits_multiple_statements_with_strings() {
+        let statements = split_statements(
+            "INSERT INTO users (id, name) VALUES (1, 'Alice; note'); SELECT * FROM users;",
+        );
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO users (id, name) VALUES (1, 'Alice; note')".to_string(),
+                "SELECT * FROM users".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn create_table_insert_row_and_select() {
+        let (root, database) = setup_users_table();
+
         let output = database
             .execute(parse_statement("SELECT * FROM users;").unwrap())
+            .unwrap();
+        let filtered_output = database
+            .execute(parse_statement("SELECT * FROM users WHERE id = 1;").unwrap())
+            .unwrap();
+        let filtered_name_output = database
+            .execute(parse_statement("SELECT * FROM users WHERE name = 'Bob';").unwrap())
             .unwrap();
 
         let table =
             parse_table_file(&fs::read_to_string(root.join("users.table")).unwrap()).unwrap();
-        assert_eq!(table.rows, vec![vec!["1".to_string(), "Alice".to_string()]]);
-        assert_eq!(output, "id\tname\n1\tAlice");
+        assert_eq!(
+            table.rows,
+            vec![
+                vec!["1".to_string(), "Alice".to_string()],
+                vec!["2".to_string(), "Bob".to_string()]
+            ]
+        );
+        assert_eq!(output, "id\tname\n1\tAlice\n2\tBob");
+        assert_eq!(filtered_output, "id\tname\n1\tAlice");
+        assert_eq!(filtered_name_output, "id\tname\n2\tBob");
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn select_where_with_unknown_column_returns_error() {
+        let (root, database) = setup_users_table();
+
+        let error = database
+            .execute(parse_statement("SELECT * FROM users WHERE age = 20;").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "unknown column `age` for table `users`");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn insert_into_unknown_column_returns_error() {
+        let (root, database) = setup_users_table();
+
+        let error = database
+            .execute(parse_statement("INSERT INTO users (age) VALUES (20);").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "unknown column `age` for table `users`");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn select_from_missing_table_returns_error() {
+        let root = test_dir();
+        let database = Database::new(&root);
+
+        let error = database
+            .execute(parse_statement("SELECT * FROM users;").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "table `users` does not exist");
+    }
+
+    #[test]
+    fn create_existing_table_returns_error() {
+        let (root, database) = setup_users_table();
+
+        let error = database
+            .execute(parse_statement("CREATE TABLE users (id INT, name TEXT);").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "table `users` already exists");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn select_where_without_match_returns_header_only() {
+        let (root, database) = setup_users_table();
+
+        let output = database
+            .execute(parse_statement("SELECT * FROM users WHERE id = 999;").unwrap())
+            .unwrap();
+
+        assert_eq!(output, "id\tname");
         fs::remove_dir_all(root).unwrap();
     }
 }
