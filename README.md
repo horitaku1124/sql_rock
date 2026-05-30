@@ -16,6 +16,7 @@ cargo run
 `WHERE` supports simple equality filters like `WHERE id = 1`.
 `DESC` shows the table schema.
 `DROP TABLE` deletes the table file.
+`DELETE FROM` deletes rows that match a `WHERE` condition.
 
 ```
 cargo run -- --data-dir ./data "CREATE TABLE users (id INT, name TEXT);"
@@ -24,6 +25,7 @@ cargo run -- --data-dir ./data "SELECT * FROM users;"
 cargo run -- --data-dir ./data "SELECT * FROM users WHERE id = 1;"
 cargo run -- --data-dir ./data "DESC users;"
 cargo run -- --data-dir ./data "DROP TABLE users;"
+cargo run -- --data-dir ./data "DELETE FROM users WHERE id = 1;"
 ```
 
 Use `--data-dir` to choose a different storage directory.

@@ -74,6 +74,10 @@ enum Statement {
     DropTable {
         table: String,
     },
+    DeleteFrom {
+        table: String,
+        where_clause: WhereClause,
+    },
 }
 
 struct Database {
@@ -99,6 +103,10 @@ impl Database {
             } => self.select_all(&table, where_clause),
             Statement::DescribeTable { table } => self.describe_table(&table),
             Statement::DropTable { table } => self.drop_table(&table),
+            Statement::DeleteFrom {
+                table,
+                where_clause,
+            } => self.delete_from(&table, where_clause),
         }
     }
 
@@ -241,6 +249,38 @@ impl Database {
         Ok(format!("dropped table `{table_name}`"))
     }
 
+    fn delete_from(&self, table_name: &str, where_clause: WhereClause) -> Result<String> {
+        let path = self.table_path(table_name)?;
+        if !path.exists() {
+            return Err(SqlRockError::new(format!(
+                "table `{table_name}` does not exist"
+            )));
+        }
+
+        let mut table = parse_table_file(&fs::read_to_string(&path)?)?;
+        let column_index = table
+            .columns
+            .iter()
+            .position(|column| column.name.eq_ignore_ascii_case(&where_clause.column))
+            .ok_or_else(|| {
+                SqlRockError::new(format!(
+                    "unknown column `{}` for table `{table_name}`",
+                    where_clause.column
+                ))
+            })?;
+
+        let original_len = table.rows.len();
+        table
+            .rows
+            .retain(|row| row.get(column_index) != Some(&where_clause.value));
+        let deleted_count = original_len - table.rows.len();
+
+        fs::write(path, serialize_table(&table))?;
+        Ok(format!(
+            "deleted {deleted_count} row(s) from `{table_name}`"
+        ))
+    }
+
     fn table_path(&self, table_name: &str) -> Result<PathBuf> {
         validate_identifier(table_name)?;
         Ok(self.root.join(format!("{table_name}.table")))
@@ -300,6 +340,7 @@ fn print_usage() {
     println!("  cargo run -- \"SELECT * FROM users WHERE id = 1;\"");
     println!("  cargo run -- \"DESC users;\"");
     println!("  cargo run -- \"DROP TABLE users;\"");
+    println!("  cargo run -- \"DELETE FROM users WHERE id = 1;\"");
     println!("  cargo run -- --data-dir ./data \"CREATE TABLE users (id INT);\"");
 }
 
@@ -316,9 +357,11 @@ fn parse_statement(sql: &str) -> Result<Statement> {
         parse_desc(sql)
     } else if starts_with_keyword(sql, "drop table") {
         parse_drop_table(sql)
+    } else if starts_with_keyword(sql, "delete from") {
+        parse_delete_from(sql)
     } else {
         Err(SqlRockError::new(
-            "unsupported SQL statement. supported: CREATE TABLE, INSERT INTO, SELECT * FROM, DESC, DROP TABLE",
+            "unsupported SQL statement. supported: CREATE TABLE, INSERT INTO, SELECT * FROM, DESC, DROP TABLE, DELETE FROM",
         ))
     }
 }
@@ -472,6 +515,18 @@ fn parse_drop_table(sql: &str) -> Result<Statement> {
 
     Ok(Statement::DropTable {
         table: table_name.to_string(),
+    })
+}
+
+fn parse_delete_from(sql: &str) -> Result<Statement> {
+    let rest = strip_keyword(sql, "delete from")?.trim_start();
+    let (table_name, trailing) = split_leading_identifier(rest)?;
+    validate_identifier(table_name)?;
+
+    let where_clause = parse_where_clause(trailing.trim_start())?;
+    Ok(Statement::DeleteFrom {
+        table: table_name.to_string(),
+        where_clause,
     })
 }
 
@@ -915,6 +970,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_delete_from() {
+        let statement = parse_statement("DELETE FROM users WHERE id = 1;").unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::DeleteFrom {
+                table: "users".to_string(),
+                where_clause: WhereClause {
+                    column: "id".to_string(),
+                    value: "1".to_string(),
+                },
+            }
+        );
+    }
+
+    #[test]
     fn splits_multiple_statements_with_strings() {
         let statements = split_statements(
             "INSERT INTO users (id, name) VALUES (1, 'Alice; note'); SELECT * FROM users;",
@@ -989,6 +1060,38 @@ mod tests {
     }
 
     #[test]
+    fn delete_from_removes_matching_rows() {
+        let (root, database) = setup_users_table();
+
+        let output = database
+            .execute(parse_statement("DELETE FROM users WHERE id = 1;").unwrap())
+            .unwrap();
+        let select_output = database
+            .execute(parse_statement("SELECT * FROM users;").unwrap())
+            .unwrap();
+
+        assert_eq!(output, "deleted 1 row(s) from `users`");
+        assert_eq!(select_output, "id\tname\n2\tBob");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_from_without_match_keeps_rows() {
+        let (root, database) = setup_users_table();
+
+        let output = database
+            .execute(parse_statement("DELETE FROM users WHERE id = 999;").unwrap())
+            .unwrap();
+        let select_output = database
+            .execute(parse_statement("SELECT * FROM users;").unwrap())
+            .unwrap();
+
+        assert_eq!(output, "deleted 0 row(s) from `users`");
+        assert_eq!(select_output, "id\tname\n1\tAlice\n2\tBob");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn select_where_with_unknown_column_returns_error() {
         let (root, database) = setup_users_table();
 
@@ -1046,6 +1149,30 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.to_string(), "table `users` does not exist");
+    }
+
+    #[test]
+    fn delete_from_missing_table_returns_error() {
+        let root = test_dir();
+        let database = Database::new(&root);
+
+        let error = database
+            .execute(parse_statement("DELETE FROM users WHERE id = 1;").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "table `users` does not exist");
+    }
+
+    #[test]
+    fn delete_from_unknown_column_returns_error() {
+        let (root, database) = setup_users_table();
+
+        let error = database
+            .execute(parse_statement("DELETE FROM users WHERE age = 20;").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "unknown column `age` for table `users`");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
