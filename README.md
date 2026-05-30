@@ -21,13 +21,13 @@ cargo run
 
 ```
 cargo run -- --data-dir ./data "CREATE TABLE users (id INT, name TEXT);"
+cargo run -- --data-dir ./data "DESC users;"
 cargo run -- --data-dir ./data "INSERT INTO users (id, name) VALUES (1, 'Alice');"
 cargo run -- --data-dir ./data "SELECT * FROM users;"
 cargo run -- --data-dir ./data "SELECT * FROM users WHERE id = 1;"
-cargo run -- --data-dir ./data "DESC users;"
-cargo run -- --data-dir ./data "DROP TABLE users;"
-cargo run -- --data-dir ./data "DELETE FROM users WHERE id = 1;"
 cargo run -- --data-dir ./data "UPDATE users SET name = 'abc' WHERE id = 1;"
+cargo run -- --data-dir ./data "DELETE FROM users WHERE id = 1;"
+cargo run -- --data-dir ./data "DROP TABLE users;"
 ```
 
 Use `--data-dir` to choose a different storage directory.
