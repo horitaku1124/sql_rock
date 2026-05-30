@@ -115,6 +115,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_select_count() {
+        let statement = parse_statement("SELECT count(id) FROM users;").unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::SelectCount {
+                table: "users".to_string(),
+                column: "id".to_string(),
+                where_clause: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_select_count_with_where() {
+        let statement = parse_statement("SELECT count(id) FROM users WHERE name = 'Bob';").unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::SelectCount {
+                table: "users".to_string(),
+                column: "id".to_string(),
+                where_clause: Some(WhereClause {
+                    column: "name".to_string(),
+                    value: "Bob".to_string(),
+                }),
+            }
+        );
+    }
+
+    #[test]
     fn parses_desc() {
         let statement = parse_statement("DESC users;").unwrap();
 
@@ -232,6 +263,22 @@ mod tests {
     }
 
     #[test]
+    fn select_count_returns_matching_count() {
+        let (root, database) = setup_users_table();
+
+        let output = database
+            .execute(parse_statement("SELECT count(id) FROM users;").unwrap())
+            .unwrap();
+        let filtered_output = database
+            .execute(parse_statement("SELECT count(id) FROM users WHERE name = 'Bob';").unwrap())
+            .unwrap();
+
+        assert_eq!(output, "count(id)\n2");
+        assert_eq!(filtered_output, "count(id)\n1");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn drop_table_removes_table_file() {
         let (root, database) = setup_users_table();
 
@@ -318,6 +365,18 @@ mod tests {
 
         let error = database
             .execute(parse_statement("SELECT * FROM users WHERE age = 20;").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "unknown column `age` for table `users`");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn select_count_unknown_column_returns_error() {
+        let (root, database) = setup_users_table();
+
+        let error = database
+            .execute(parse_statement("SELECT count(age) FROM users;").unwrap())
             .unwrap_err();
 
         assert_eq!(error.to_string(), "unknown column `age` for table `users`");

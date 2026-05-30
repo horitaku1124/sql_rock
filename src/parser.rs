@@ -20,7 +20,7 @@ pub fn parse_statement(sql: &str) -> Result<Statement> {
         parse_update(sql)
     } else {
         Err(SqlRockError::new(
-            "unsupported SQL statement. supported: CREATE TABLE, INSERT INTO, SELECT * FROM, DESC, DROP TABLE, DELETE FROM, UPDATE",
+            "unsupported SQL statement. supported: CREATE TABLE, INSERT INTO, SELECT, DESC, DROP TABLE, DELETE FROM, UPDATE",
         ))
     }
 }
@@ -140,7 +140,21 @@ fn parse_insert_into(sql: &str) -> Result<Statement> {
 
 fn parse_select(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "select")?.trim_start();
-    let rest = strip_keyword(rest, "*")?.trim_start();
+    if rest.starts_with('*') {
+        return parse_select_all(rest);
+    }
+
+    if starts_with_keyword(rest, "count") {
+        return parse_select_count(rest);
+    }
+
+    Err(SqlRockError::new(
+        "unsupported SELECT expression. supported: SELECT * FROM, SELECT count(column) FROM",
+    ))
+}
+
+fn parse_select_all(sql: &str) -> Result<Statement> {
+    let rest = strip_keyword(sql, "*")?.trim_start();
     let rest = strip_keyword(rest, "from")?.trim_start();
     let (table_name, trailing) = split_leading_identifier(rest)?;
     validate_identifier(table_name)?;
@@ -154,6 +168,30 @@ fn parse_select(sql: &str) -> Result<Statement> {
 
     Ok(Statement::SelectAll {
         table: table_name.to_string(),
+        where_clause,
+    })
+}
+
+fn parse_select_count(sql: &str) -> Result<Statement> {
+    let rest = strip_keyword(sql, "count")?.trim_start();
+    let (column_name, rest) = take_parenthesized(rest)?;
+    let column_name = column_name.trim();
+    validate_identifier(column_name)?;
+
+    let rest = strip_keyword(rest.trim_start(), "from")?.trim_start();
+    let (table_name, trailing) = split_leading_identifier(rest)?;
+    validate_identifier(table_name)?;
+
+    let trailing = trailing.trim_start();
+    let where_clause = if trailing.is_empty() {
+        None
+    } else {
+        Some(parse_where_clause(trailing)?)
+    };
+
+    Ok(Statement::SelectCount {
+        table: table_name.to_string(),
+        column: column_name.to_string(),
         where_clause,
     })
 }

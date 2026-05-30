@@ -38,6 +38,11 @@ pub enum Statement {
         table: String,
         where_clause: Option<WhereClause>,
     },
+    SelectCount {
+        table: String,
+        column: String,
+        where_clause: Option<WhereClause>,
+    },
     DescribeTable {
         table: String,
     },
