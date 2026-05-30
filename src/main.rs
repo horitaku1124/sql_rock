@@ -54,6 +54,12 @@ struct WhereClause {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct SetClause {
+    column: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Statement {
     CreateTable {
         name: String,
@@ -76,6 +82,11 @@ enum Statement {
     },
     DeleteFrom {
         table: String,
+        where_clause: WhereClause,
+    },
+    Update {
+        table: String,
+        set_clause: SetClause,
         where_clause: WhereClause,
     },
 }
@@ -107,6 +118,11 @@ impl Database {
                 table,
                 where_clause,
             } => self.delete_from(&table, where_clause),
+            Statement::Update {
+                table,
+                set_clause,
+                where_clause,
+            } => self.update_rows(&table, set_clause, where_clause),
         }
     }
 
@@ -281,6 +297,53 @@ impl Database {
         ))
     }
 
+    fn update_rows(
+        &self,
+        table_name: &str,
+        set_clause: SetClause,
+        where_clause: WhereClause,
+    ) -> Result<String> {
+        let path = self.table_path(table_name)?;
+        if !path.exists() {
+            return Err(SqlRockError::new(format!(
+                "table `{table_name}` does not exist"
+            )));
+        }
+
+        let mut table = parse_table_file(&fs::read_to_string(&path)?)?;
+        let set_index = table
+            .columns
+            .iter()
+            .position(|column| column.name.eq_ignore_ascii_case(&set_clause.column))
+            .ok_or_else(|| {
+                SqlRockError::new(format!(
+                    "unknown column `{}` for table `{table_name}`",
+                    set_clause.column
+                ))
+            })?;
+        let where_index = table
+            .columns
+            .iter()
+            .position(|column| column.name.eq_ignore_ascii_case(&where_clause.column))
+            .ok_or_else(|| {
+                SqlRockError::new(format!(
+                    "unknown column `{}` for table `{table_name}`",
+                    where_clause.column
+                ))
+            })?;
+
+        let mut updated_count = 0;
+        for row in &mut table.rows {
+            if row.get(where_index) == Some(&where_clause.value) {
+                row[set_index] = set_clause.value.clone();
+                updated_count += 1;
+            }
+        }
+
+        fs::write(path, serialize_table(&table))?;
+        Ok(format!("updated {updated_count} row(s) in `{table_name}`"))
+    }
+
     fn table_path(&self, table_name: &str) -> Result<PathBuf> {
         validate_identifier(table_name)?;
         Ok(self.root.join(format!("{table_name}.table")))
@@ -341,6 +404,7 @@ fn print_usage() {
     println!("  cargo run -- \"DESC users;\"");
     println!("  cargo run -- \"DROP TABLE users;\"");
     println!("  cargo run -- \"DELETE FROM users WHERE id = 1;\"");
+    println!("  cargo run -- \"UPDATE users SET name = 'abc' WHERE id = 1;\"");
     println!("  cargo run -- --data-dir ./data \"CREATE TABLE users (id INT);\"");
 }
 
@@ -359,9 +423,11 @@ fn parse_statement(sql: &str) -> Result<Statement> {
         parse_drop_table(sql)
     } else if starts_with_keyword(sql, "delete from") {
         parse_delete_from(sql)
+    } else if starts_with_keyword(sql, "update") {
+        parse_update(sql)
     } else {
         Err(SqlRockError::new(
-            "unsupported SQL statement. supported: CREATE TABLE, INSERT INTO, SELECT * FROM, DESC, DROP TABLE, DELETE FROM",
+            "unsupported SQL statement. supported: CREATE TABLE, INSERT INTO, SELECT * FROM, DESC, DROP TABLE, DELETE FROM, UPDATE",
         ))
     }
 }
@@ -527,6 +593,45 @@ fn parse_delete_from(sql: &str) -> Result<Statement> {
     Ok(Statement::DeleteFrom {
         table: table_name.to_string(),
         where_clause,
+    })
+}
+
+fn parse_update(sql: &str) -> Result<Statement> {
+    let rest = strip_keyword(sql, "update")?.trim_start();
+    let (table_name, trailing) = split_leading_identifier(rest)?;
+    validate_identifier(table_name)?;
+
+    let trailing = trailing.trim_start();
+    let after_set = strip_keyword(trailing, "set")?.trim_start();
+    let Some((set_sql, where_sql)) = split_once_keyword(after_set, "where") else {
+        return Err(SqlRockError::new(
+            "UPDATE requires WHERE: UPDATE table SET column = value WHERE column = value",
+        ));
+    };
+
+    let set_clause = parse_set_clause(set_sql.trim())?;
+    let where_clause = parse_where_clause(where_sql.trim_start())?;
+
+    Ok(Statement::Update {
+        table: table_name.to_string(),
+        set_clause,
+        where_clause,
+    })
+}
+
+fn parse_set_clause(sql: &str) -> Result<SetClause> {
+    let Some((column_name, value_sql)) = sql.split_once('=') else {
+        return Err(SqlRockError::new(
+            "SET clause requires a value: SET column = value",
+        ));
+    };
+    let column_name = column_name.trim();
+    validate_identifier(column_name)?;
+    let value = parse_value(value_sql.trim())?;
+
+    Ok(SetClause {
+        column: column_name.to_string(),
+        value,
     })
 }
 
@@ -766,6 +871,36 @@ fn split_comma_separated(input: &str) -> Vec<String> {
     items
 }
 
+fn split_once_keyword<'a>(input: &'a str, keyword: &str) -> Option<(&'a str, &'a str)> {
+    let mut in_string = false;
+    let mut chars = input.char_indices().peekable();
+
+    while let Some((index, ch)) = chars.next() {
+        if ch == '\'' {
+            if in_string && chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                chars.next();
+            } else {
+                in_string = !in_string;
+            }
+            continue;
+        }
+
+        if in_string {
+            continue;
+        }
+
+        let rest = &input[index..];
+        if rest
+            .get(..keyword.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
+        {
+            return Some((&input[..index], rest));
+        }
+    }
+
+    None
+}
+
 fn strip_keyword<'a>(input: &'a str, keyword: &str) -> Result<&'a str> {
     if starts_with_keyword(input, keyword) {
         Ok(&input[keyword.len()..])
@@ -986,6 +1121,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_update() {
+        let statement = parse_statement("UPDATE users SET name = 'abc' WHERE id = 1;").unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::Update {
+                table: "users".to_string(),
+                set_clause: SetClause {
+                    column: "name".to_string(),
+                    value: "abc".to_string(),
+                },
+                where_clause: WhereClause {
+                    column: "id".to_string(),
+                    value: "1".to_string(),
+                },
+            }
+        );
+    }
+
+    #[test]
     fn splits_multiple_statements_with_strings() {
         let statements = split_statements(
             "INSERT INTO users (id, name) VALUES (1, 'Alice; note'); SELECT * FROM users;",
@@ -1092,6 +1247,38 @@ mod tests {
     }
 
     #[test]
+    fn update_rows_updates_matching_rows() {
+        let (root, database) = setup_users_table();
+
+        let output = database
+            .execute(parse_statement("UPDATE users SET name = 'abc' WHERE id = 1;").unwrap())
+            .unwrap();
+        let select_output = database
+            .execute(parse_statement("SELECT * FROM users;").unwrap())
+            .unwrap();
+
+        assert_eq!(output, "updated 1 row(s) in `users`");
+        assert_eq!(select_output, "id\tname\n1\tabc\n2\tBob");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn update_rows_without_match_keeps_rows() {
+        let (root, database) = setup_users_table();
+
+        let output = database
+            .execute(parse_statement("UPDATE users SET name = 'abc' WHERE id = 999;").unwrap())
+            .unwrap();
+        let select_output = database
+            .execute(parse_statement("SELECT * FROM users;").unwrap())
+            .unwrap();
+
+        assert_eq!(output, "updated 0 row(s) in `users`");
+        assert_eq!(select_output, "id\tname\n1\tAlice\n2\tBob");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn select_where_with_unknown_column_returns_error() {
         let (root, database) = setup_users_table();
 
@@ -1169,6 +1356,30 @@ mod tests {
 
         let error = database
             .execute(parse_statement("DELETE FROM users WHERE age = 20;").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "unknown column `age` for table `users`");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn update_missing_table_returns_error() {
+        let root = test_dir();
+        let database = Database::new(&root);
+
+        let error = database
+            .execute(parse_statement("UPDATE users SET name = 'abc' WHERE id = 1;").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "table `users` does not exist");
+    }
+
+    #[test]
+    fn update_unknown_column_returns_error() {
+        let (root, database) = setup_users_table();
+
+        let error = database
+            .execute(parse_statement("UPDATE users SET age = 20 WHERE id = 1;").unwrap())
             .unwrap_err();
 
         assert_eq!(error.to_string(), "unknown column `age` for table `users`");
