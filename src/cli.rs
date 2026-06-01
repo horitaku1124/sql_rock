@@ -48,6 +48,7 @@ fn print_usage() {
     println!("  cargo run -- \"CREATE TABLE users (id INT, name TEXT);\"");
     println!("  cargo run -- \"INSERT INTO users (id, name) VALUES (1, 'Alice');\"");
     println!("  cargo run -- \"SELECT * FROM users;\"");
+    println!("  cargo run -- \"SELECT count(id) FROM users;\"");
     println!("  cargo run -- \"SELECT * FROM users WHERE id = 1;\"");
     println!("  cargo run -- \"DESC users;\"");
     println!("  cargo run -- \"DROP TABLE users;\"");

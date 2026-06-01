@@ -25,6 +25,11 @@ impl Database {
                 table,
                 where_clause,
             } => self.select_all(&table, where_clause),
+            Statement::SelectCount {
+                table,
+                column,
+                where_clause,
+            } => self.select_count(&table, &column, where_clause),
             Statement::DescribeTable { table } => self.describe_table(&table),
             Statement::DropTable { table } => self.drop_table(&table),
             Statement::DeleteFrom {
@@ -125,6 +130,32 @@ impl Database {
         );
 
         Ok(lines.join("\n"))
+    }
+
+    fn select_count(
+        &self,
+        table_name: &str,
+        count_column: &str,
+        where_clause: Option<WhereClause>,
+    ) -> Result<String> {
+        let table = self.read_table(table_name)?;
+        let count_index = column_index(&table, count_column, table_name)?;
+        let where_index = match &where_clause {
+            Some(where_clause) => Some(column_index(&table, &where_clause.column, table_name)?),
+            None => None,
+        };
+
+        let count = table
+            .rows
+            .iter()
+            .filter(|row| match (&where_clause, where_index) {
+                (Some(where_clause), Some(index)) => row.get(index) == Some(&where_clause.value),
+                _ => true,
+            })
+            .filter(|row| row.get(count_index).is_some_and(|value| !value.is_empty()))
+            .count();
+
+        Ok(format!("count({count_column})\n{count}"))
     }
 
     fn drop_table(&self, table_name: &str) -> Result<String> {
