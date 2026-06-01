@@ -23,5 +23,5 @@ jobs:
       - name: Build binary
         run: cargo build
 
-      - name: Run built binary with sh
-        run: sh scripts/build-and-sh-run-check.sh
+      - name: Run built binary checks
+        run: bash scripts/build-and-sh-run-check.sh
