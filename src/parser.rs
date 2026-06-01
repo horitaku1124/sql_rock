@@ -1,5 +1,6 @@
 use crate::error::{Result, SqlRockError};
-use crate::model::{Column, SetClause, Statement, WhereClause};
+use crate::model::{AlterTableAction, Column, SetClause, Statement, WhereClause};
+use crate::query_parser::parse_select_query;
 
 pub fn parse_statement(sql: &str) -> Result<Statement> {
     let sql = sql.trim().trim_end_matches(';').trim();
@@ -10,18 +11,26 @@ pub fn parse_statement(sql: &str) -> Result<Statement> {
         parse_insert_into(sql)
     } else if starts_with_keyword(sql, "select") {
         parse_select(sql)
+    } else if starts_with_keyword(sql, "describe") {
+        parse_describe(sql)
     } else if starts_with_keyword(sql, "desc") {
         parse_desc(sql)
+    } else if starts_with_keyword(sql, "show tables") {
+        parse_show_tables(sql)
+    } else if starts_with_keyword(sql, "show create table") {
+        parse_show_create_table(sql)
+    } else if starts_with_keyword(sql, "alter table") {
+        parse_alter_table(sql)
     } else if starts_with_keyword(sql, "drop table") {
         parse_drop_table(sql)
     } else if starts_with_keyword(sql, "delete from") {
         parse_delete_from(sql)
     } else if starts_with_keyword(sql, "update") {
         parse_update(sql)
+    } else if starts_with_keyword(sql, "truncate table") {
+        parse_truncate_table(sql)
     } else {
-        Err(SqlRockError::new(
-            "unsupported SQL statement. supported: CREATE TABLE, INSERT INTO, SELECT, DESC, DROP TABLE, DELETE FROM, UPDATE",
-        ))
+        Err(SqlRockError::new("unsupported SQL statement"))
     }
 }
 
@@ -102,6 +111,12 @@ fn parse_insert_into(sql: &str) -> Result<Statement> {
     validate_identifier(table_name)?;
 
     let rest = rest.trim_start();
+    if starts_with_keyword(rest, "select") {
+        return Ok(Statement::InsertSelect {
+            table: table_name.to_string(),
+            query: Box::new(parse_select_query(rest)?),
+        });
+    }
     if !rest.starts_with('(') {
         return Err(SqlRockError::new(
             "INSERT INTO requires an explicit column list: INSERT INTO table (col) VALUES (...)",
@@ -110,14 +125,6 @@ fn parse_insert_into(sql: &str) -> Result<Statement> {
 
     let (columns_sql, after_columns) = take_parenthesized(rest)?;
     let after_values = strip_keyword(after_columns.trim_start(), "values")?.trim_start();
-    let (values_sql, trailing) = take_parenthesized(after_values)?;
-    if !trailing.trim().is_empty() {
-        return Err(SqlRockError::new(format!(
-            "unexpected trailing SQL: {}",
-            trailing.trim()
-        )));
-    }
-
     let columns = split_comma_separated(columns_sql)
         .into_iter()
         .map(|column| {
@@ -126,31 +133,86 @@ fn parse_insert_into(sql: &str) -> Result<Statement> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let values = split_comma_separated(values_sql)
-        .into_iter()
-        .map(|value| parse_value(&value))
-        .collect::<Result<Vec<_>>>()?;
-
-    Ok(Statement::InsertInto {
-        table: table_name.to_string(),
-        columns,
-        values,
-    })
+    let mut rows = Vec::new();
+    let mut trailing = after_values;
+    loop {
+        let (values_sql, rest) = take_parenthesized(trailing)?;
+        rows.push(
+            split_comma_separated(values_sql)
+                .into_iter()
+                .map(|value| parse_value(&value))
+                .collect::<Result<Vec<_>>>()?,
+        );
+        trailing = rest.trim_start();
+        if !trailing.starts_with(',') {
+            break;
+        }
+        trailing = trailing[1..].trim_start();
+    }
+    if !trailing.trim().is_empty() {
+        return Err(SqlRockError::new(format!(
+            "unexpected trailing SQL: {}",
+            trailing.trim()
+        )));
+    }
+    if rows.len() == 1 {
+        Ok(Statement::InsertInto {
+            table: table_name.to_string(),
+            columns,
+            values: rows.remove(0),
+        })
+    } else {
+        Ok(Statement::InsertRows {
+            table: table_name.to_string(),
+            columns,
+            rows,
+        })
+    }
 }
 
 fn parse_select(sql: &str) -> Result<Statement> {
+    if requires_query_engine(sql) {
+        return Ok(Statement::SelectQuery(Box::new(parse_select_query(sql)?)));
+    }
+
     let rest = strip_keyword(sql, "select")?.trim_start();
     if rest.starts_with('*') {
-        return parse_select_all(rest);
+        return parse_select_all(rest)
+            .or_else(|_| Ok(Statement::SelectQuery(Box::new(parse_select_query(sql)?))));
     }
 
     if starts_with_keyword(rest, "count") {
-        return parse_select_count(rest);
+        return parse_select_count(rest)
+            .or_else(|_| Ok(Statement::SelectQuery(Box::new(parse_select_query(sql)?))));
     }
 
-    Err(SqlRockError::new(
-        "unsupported SELECT expression. supported: SELECT * FROM, SELECT count(column) FROM",
-    ))
+    Ok(Statement::SelectQuery(Box::new(parse_select_query(sql)?)))
+}
+
+fn requires_query_engine(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    [
+        " distinct ",
+        " order ",
+        " limit ",
+        " group ",
+        " having ",
+        " join ",
+        " union ",
+        " case ",
+        " between ",
+        " in ",
+        " like ",
+        " is ",
+        " exists ",
+        " and ",
+        " or ",
+        ">",
+        "<",
+        "!=",
+    ]
+    .iter()
+    .any(|keyword| lower.contains(keyword))
 }
 
 fn parse_select_all(sql: &str) -> Result<Statement> {
@@ -212,6 +274,54 @@ fn parse_desc(sql: &str) -> Result<Statement> {
     })
 }
 
+fn parse_describe(sql: &str) -> Result<Statement> {
+    parse_table_only(sql, "describe", |table| Statement::DescribeTable { table })
+}
+
+fn parse_show_tables(sql: &str) -> Result<Statement> {
+    let trailing = strip_keyword(sql, "show tables")?;
+    if !trailing.trim().is_empty() {
+        return Err(SqlRockError::new("unexpected trailing SQL"));
+    }
+    Ok(Statement::ShowTables)
+}
+
+fn parse_show_create_table(sql: &str) -> Result<Statement> {
+    parse_table_only(sql, "show create table", |table| {
+        Statement::ShowCreateTable { table }
+    })
+}
+
+fn parse_alter_table(sql: &str) -> Result<Statement> {
+    let rest = strip_keyword(sql, "alter table")?.trim_start();
+    let (table, rest) = split_leading_identifier(rest)?;
+    validate_identifier(table)?;
+    let rest = rest.trim_start();
+    let action = if starts_with_keyword(rest, "add column") {
+        AlterTableAction::Add(parse_column_definition(
+            strip_keyword(rest, "add column")?.trim_start(),
+        )?)
+    } else if starts_with_keyword(rest, "modify column") {
+        AlterTableAction::Modify(parse_column_definition(
+            strip_keyword(rest, "modify column")?.trim_start(),
+        )?)
+    } else if starts_with_keyword(rest, "change column") {
+        let rest = strip_keyword(rest, "change column")?.trim_start();
+        let (old_name, rest) = split_leading_identifier(rest)?;
+        validate_identifier(old_name)?;
+        AlterTableAction::Change {
+            old_name: old_name.to_string(),
+            column: parse_column_definition(rest.trim_start())?,
+        }
+    } else {
+        return Err(SqlRockError::new("unsupported ALTER TABLE action"));
+    };
+    Ok(Statement::AlterTable {
+        table: table.to_string(),
+        action,
+    })
+}
+
 fn parse_drop_table(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "drop table")?.trim_start();
     let (table_name, trailing) = split_leading_identifier(rest)?;
@@ -233,10 +343,22 @@ fn parse_delete_from(sql: &str) -> Result<Statement> {
     let (table_name, trailing) = split_leading_identifier(rest)?;
     validate_identifier(table_name)?;
 
-    let where_clause = parse_where_clause(trailing.trim_start())?;
-    Ok(Statement::DeleteFrom {
-        table: table_name.to_string(),
-        where_clause,
+    if trailing.trim().is_empty() {
+        Ok(Statement::DeleteAll {
+            table: table_name.to_string(),
+        })
+    } else {
+        let where_clause = parse_where_clause(trailing.trim_start())?;
+        Ok(Statement::DeleteFrom {
+            table: table_name.to_string(),
+            where_clause,
+        })
+    }
+}
+
+fn parse_truncate_table(sql: &str) -> Result<Statement> {
+    parse_table_only(sql, "truncate table", |table| Statement::TruncateTable {
+        table,
     })
 }
 
@@ -253,13 +375,54 @@ fn parse_update(sql: &str) -> Result<Statement> {
         ));
     };
 
-    let set_clause = parse_set_clause(set_sql.trim())?;
+    let set_clauses = split_comma_separated(set_sql)
+        .into_iter()
+        .map(|set_sql| parse_set_clause(&set_sql))
+        .collect::<Result<Vec<_>>>()?;
     let where_clause = parse_where_clause(where_sql.trim_start())?;
 
-    Ok(Statement::Update {
-        table: table_name.to_string(),
-        set_clause,
-        where_clause,
+    if set_clauses.len() == 1 {
+        Ok(Statement::Update {
+            table: table_name.to_string(),
+            set_clause: set_clauses.into_iter().next().expect("checked length"),
+            where_clause,
+        })
+    } else {
+        Ok(Statement::UpdateMany {
+            table: table_name.to_string(),
+            set_clauses,
+            where_clause,
+        })
+    }
+}
+
+fn parse_table_only(
+    sql: &str,
+    keyword: &str,
+    build: impl FnOnce(String) -> Statement,
+) -> Result<Statement> {
+    let rest = strip_keyword(sql, keyword)?.trim_start();
+    let (table, trailing) = split_leading_identifier(rest)?;
+    validate_identifier(table)?;
+    if !trailing.trim().is_empty() {
+        return Err(SqlRockError::new("unexpected trailing SQL"));
+    }
+    Ok(build(table.to_string()))
+}
+
+fn parse_column_definition(sql: &str) -> Result<Column> {
+    let mut parts = sql.split_whitespace();
+    let name = parts
+        .next()
+        .ok_or_else(|| SqlRockError::new("expected column name"))?;
+    validate_identifier(name)?;
+    let data_type = parts.collect::<Vec<_>>().join(" ");
+    if data_type.is_empty() {
+        return Err(SqlRockError::new("expected column type"));
+    }
+    Ok(Column {
+        name: name.to_string(),
+        data_type,
     })
 }
 

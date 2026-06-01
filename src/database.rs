@@ -1,5 +1,6 @@
 use crate::error::{Result, SqlRockError};
-use crate::model::{Column, SetClause, Statement, Table, WhereClause};
+use crate::model::{AlterTableAction, Column, SetClause, Statement, Table, WhereClause};
+use crate::query_engine::execute_query;
 use crate::storage::{parse_table_file, serialize_table};
 use std::fs;
 use std::path::PathBuf;
@@ -21,6 +22,12 @@ impl Database {
                 columns,
                 values,
             } => self.insert_into(&table, columns, values),
+            Statement::InsertRows {
+                table,
+                columns,
+                rows,
+            } => self.insert_rows(&table, columns, rows),
+            Statement::InsertSelect { table, query } => self.insert_select(&table, &query),
             Statement::SelectAll {
                 table,
                 where_clause,
@@ -31,16 +38,29 @@ impl Database {
                 where_clause,
             } => self.select_count(&table, &column, where_clause),
             Statement::DescribeTable { table } => self.describe_table(&table),
+            Statement::ShowTables => self.show_tables(),
+            Statement::ShowCreateTable { table } => self.show_create_table(&table),
+            Statement::AlterTable { table, action } => self.alter_table(&table, action),
             Statement::DropTable { table } => self.drop_table(&table),
             Statement::DeleteFrom {
                 table,
                 where_clause,
             } => self.delete_from(&table, where_clause),
+            Statement::DeleteAll { table } => self.delete_all(&table),
+            Statement::TruncateTable { table } => self.delete_all(&table),
             Statement::Update {
                 table,
                 set_clause,
                 where_clause,
             } => self.update_rows(&table, set_clause, where_clause),
+            Statement::UpdateMany {
+                table,
+                set_clauses,
+                where_clause,
+            } => self.update_many(&table, set_clauses, where_clause),
+            Statement::SelectQuery(query) => {
+                Ok(execute_query(&query, &|table| self.read_table(table))?.render())
+            }
         }
     }
 
@@ -91,6 +111,38 @@ impl Database {
         Ok(format!("inserted 1 row into `{table_name}`"))
     }
 
+    fn insert_rows(
+        &self,
+        table_name: &str,
+        columns: Vec<String>,
+        rows: Vec<Vec<String>>,
+    ) -> Result<String> {
+        let count = rows.len();
+        for values in rows {
+            self.insert_into(table_name, columns.clone(), values)?;
+        }
+        Ok(format!("inserted {count} row(s) into `{table_name}`"))
+    }
+
+    fn insert_select(&self, table_name: &str, query: &crate::model::SelectQuery) -> Result<String> {
+        let target = self.read_table(table_name)?;
+        let result = execute_query(query, &|table| self.read_table(table))?;
+        if result.headers.len() != target.columns.len() {
+            return Err(SqlRockError::new(
+                "INSERT SELECT column count does not match target table",
+            ));
+        }
+        self.insert_rows(
+            table_name,
+            target
+                .columns
+                .into_iter()
+                .map(|column| column.name)
+                .collect(),
+            result.rows,
+        )
+    }
+
     fn select_all(&self, table_name: &str, where_clause: Option<WhereClause>) -> Result<String> {
         let table = self.read_table(table_name)?;
         let where_index = match &where_clause {
@@ -130,6 +182,64 @@ impl Database {
         );
 
         Ok(lines.join("\n"))
+    }
+
+    fn show_tables(&self) -> Result<String> {
+        fs::create_dir_all(&self.root)?;
+        let mut tables = fs::read_dir(&self.root)?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                entry
+                    .path()
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        tables.sort();
+        let mut lines = vec!["Tables".to_string()];
+        lines.extend(tables);
+        Ok(lines.join("\n"))
+    }
+
+    fn show_create_table(&self, table_name: &str) -> Result<String> {
+        let table = self.read_table(table_name)?;
+        let columns = table
+            .columns
+            .iter()
+            .map(|column| format!("{} {}", column.name, column.data_type))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!(
+            "Table\tCreate Table\n{table_name}\tCREATE TABLE {table_name} ({columns})"
+        ))
+    }
+
+    fn alter_table(&self, table_name: &str, action: AlterTableAction) -> Result<String> {
+        let path = self.existing_table_path(table_name)?;
+        let mut table = parse_table_file(&fs::read_to_string(&path)?)?;
+        match action {
+            AlterTableAction::Add(column) => {
+                ensure_column_missing(&table, &column.name, table_name)?;
+                table.columns.push(column);
+                for row in &mut table.rows {
+                    row.push(String::new());
+                }
+            }
+            AlterTableAction::Modify(column) => {
+                let index = column_index(&table, &column.name, table_name)?;
+                table.columns[index].data_type = column.data_type;
+            }
+            AlterTableAction::Change { old_name, column } => {
+                let index = column_index(&table, &old_name, table_name)?;
+                if !old_name.eq_ignore_ascii_case(&column.name) {
+                    ensure_column_missing(&table, &column.name, table_name)?;
+                }
+                table.columns[index] = column;
+            }
+        }
+        fs::write(path, serialize_table(&table))?;
+        Ok(format!("altered table `{table_name}`"))
     }
 
     fn select_count(
@@ -181,6 +291,17 @@ impl Database {
         ))
     }
 
+    fn delete_all(&self, table_name: &str) -> Result<String> {
+        let path = self.existing_table_path(table_name)?;
+        let mut table = parse_table_file(&fs::read_to_string(&path)?)?;
+        let deleted_count = table.rows.len();
+        table.rows.clear();
+        fs::write(path, serialize_table(&table))?;
+        Ok(format!(
+            "deleted {deleted_count} row(s) from `{table_name}`"
+        ))
+    }
+
     fn update_rows(
         &self,
         table_name: &str,
@@ -200,6 +321,32 @@ impl Database {
             }
         }
 
+        fs::write(path, serialize_table(&table))?;
+        Ok(format!("updated {updated_count} row(s) in `{table_name}`"))
+    }
+
+    fn update_many(
+        &self,
+        table_name: &str,
+        set_clauses: Vec<SetClause>,
+        where_clause: WhereClause,
+    ) -> Result<String> {
+        let path = self.existing_table_path(table_name)?;
+        let mut table = parse_table_file(&fs::read_to_string(&path)?)?;
+        let updates = set_clauses
+            .iter()
+            .map(|set| Ok((column_index(&table, &set.column, table_name)?, &set.value)))
+            .collect::<Result<Vec<_>>>()?;
+        let where_index = column_index(&table, &where_clause.column, table_name)?;
+        let mut updated_count = 0;
+        for row in &mut table.rows {
+            if row.get(where_index) == Some(&where_clause.value) {
+                for (index, value) in &updates {
+                    row[*index] = (*value).clone();
+                }
+                updated_count += 1;
+            }
+        }
         fs::write(path, serialize_table(&table))?;
         Ok(format!("updated {updated_count} row(s) in `{table_name}`"))
     }
@@ -236,6 +383,20 @@ fn column_index(table: &Table, column_name: &str, table_name: &str) -> Result<us
                 "unknown column `{column_name}` for table `{table_name}`"
             ))
         })
+}
+
+fn ensure_column_missing(table: &Table, column_name: &str, table_name: &str) -> Result<()> {
+    if table
+        .columns
+        .iter()
+        .any(|column| column.name.eq_ignore_ascii_case(column_name))
+    {
+        Err(SqlRockError::new(format!(
+            "column `{column_name}` already exists for table `{table_name}`"
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_identifier(identifier: &str) -> Result<()> {

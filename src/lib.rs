@@ -3,6 +3,8 @@ pub mod database;
 pub mod error;
 pub mod model;
 pub mod parser;
+pub mod query_engine;
+pub mod query_parser;
 pub mod storage;
 
 #[cfg(test)]
@@ -46,6 +48,10 @@ mod tests {
             .unwrap();
 
         (root, database)
+    }
+
+    fn execute_sql(database: &Database, sql: &str) -> String {
+        database.execute(parse_statement(sql).unwrap()).unwrap()
     }
 
     #[test]
@@ -500,6 +506,228 @@ mod tests {
             .unwrap();
 
         assert_eq!(output, "id\tname");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn advanced_select_filters_sorts_limits_and_aggregates() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT, name TEXT, age INT, email TEXT);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, name, age, email) VALUES (1, 'Taro', 20, 'taro@example.com'), (2, 'Jiro', 25, NULL), (3, 'Taro', 30, 'taro2@example.com');",
+        );
+
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT id, name FROM users WHERE age >= 20 ORDER BY age DESC LIMIT 2;"
+            ),
+            "id\tname\n3\tTaro\n2\tJiro"
+        );
+        assert_eq!(
+            execute_sql(&database, "SELECT DISTINCT name FROM users ORDER BY name;"),
+            "name\nJiro\nTaro"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT COUNT(*), SUM(age), AVG(age), MAX(age), MIN(age) FROM users;"
+            ),
+            "count(*)\tsum(age)\tavg(age)\tmax(age)\tmin(age)\n3\t75\t25\t30\t20"
+        );
+        assert_eq!(
+            execute_sql(&database, "SELECT id FROM users WHERE email IS NULL;"),
+            "id\n2"
+        );
+        assert_eq!(
+            execute_sql(&database, "SELECT name FROM users WHERE name LIKE 'Ta%';"),
+            "name\nTaro\nTaro"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT id FROM users WHERE age >= 20 AND name = 'Taro' ORDER BY id;"
+            ),
+            "id\n1\n3"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT id FROM users WHERE age < 21 OR age > 29 ORDER BY id;"
+            ),
+            "id\n1\n3"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn advanced_select_groups_and_evaluates_case() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT, name TEXT, age INT);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, name, age) VALUES (1, 'Taro', 20), (2, 'Jiro', 20), (3, 'Saburo', 30);",
+        );
+
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT age, COUNT(*) FROM users GROUP BY age HAVING COUNT(*) >= 2 ORDER BY age;"
+            ),
+            "age\tcount(*)\n20\t2"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT name, CASE WHEN age < 25 THEN 'Young' ELSE 'Adult' END AS category FROM users ORDER BY id;"
+            ),
+            "name\tcategory\nTaro\tYoung\nJiro\tYoung\nSaburo\tAdult"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn advanced_select_joins_subqueries_unions_and_insert_select() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(&database, "CREATE TABLE users (id INT, name TEXT);");
+        execute_sql(
+            &database,
+            "CREATE TABLE orders (id INT, user_id INT, amount INT);",
+        );
+        execute_sql(&database, "CREATE TABLE archive_users (id INT, name TEXT);");
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, name) VALUES (1, 'Taro'), (2, 'Jiro');",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO orders (id, user_id, amount) VALUES (10, 1, 500), (11, 1, 700), (12, 9, 100);",
+        );
+
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id ORDER BY o.amount;"
+            ),
+            "u.name\to.amount\nTaro\t500\nTaro\t700"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT u.name, o.amount FROM users u LEFT JOIN orders o ON u.id = o.user_id ORDER BY u.id, o.amount;"
+            ),
+            "u.name\to.amount\nTaro\t500\nTaro\t700\nJiro\t"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT u.name, o.amount FROM users u RIGHT JOIN orders o ON u.id = o.user_id ORDER BY o.id;"
+            ),
+            "u.name\to.amount\nTaro\t500\nTaro\t700\n\t100"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT u.name, o.amount FROM users u CROSS JOIN orders o ORDER BY u.id, o.id LIMIT 2;"
+            ),
+            "u.name\to.amount\nTaro\t500\nTaro\t700"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT name FROM users WHERE id IN (SELECT user_id FROM orders) ORDER BY name;"
+            ),
+            "name\nTaro"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT name FROM users u WHERE EXISTS (SELECT id FROM orders o WHERE o.user_id = u.id) ORDER BY name;"
+            ),
+            "name\nTaro"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT name FROM (SELECT name FROM users) t ORDER BY name;"
+            ),
+            "name\nJiro\nTaro"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT name FROM users UNION SELECT name FROM users;"
+            ),
+            "name\nTaro\nJiro"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT name FROM users UNION ALL SELECT name FROM users;"
+            ),
+            "name\nTaro\nJiro\nTaro\nJiro"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "INSERT INTO archive_users SELECT id, name FROM users WHERE id > 1;"
+            ),
+            "inserted 1 row(s) into `archive_users`"
+        );
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM archive_users;"),
+            "id\tname\n2\tJiro"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ddl_extensions_show_alter_delete_all_and_truncate() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(&database, "CREATE TABLE users (id INT, name TEXT);");
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, name) VALUES (1, 'Taro'), (2, 'Jiro');",
+        );
+
+        assert_eq!(execute_sql(&database, "SHOW TABLES;"), "Tables\nusers");
+        assert_eq!(
+            execute_sql(&database, "SHOW CREATE TABLE users;"),
+            "Table\tCreate Table\nusers\tCREATE TABLE users (id INT, name TEXT)"
+        );
+        execute_sql(&database, "ALTER TABLE users ADD COLUMN age INT;");
+        execute_sql(&database, "ALTER TABLE users MODIFY COLUMN age SMALLINT;");
+        execute_sql(
+            &database,
+            "ALTER TABLE users CHANGE COLUMN name full_name VARCHAR(100);",
+        );
+        assert_eq!(
+            execute_sql(&database, "DESCRIBE users;"),
+            "Field\tType\nid\tINT\nfull_name\tVARCHAR(100)\nage\tSMALLINT"
+        );
+        assert_eq!(
+            execute_sql(&database, "DELETE FROM users;"),
+            "deleted 2 row(s) from `users`"
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, full_name) VALUES (3, 'Saburo');",
+        );
+        assert_eq!(
+            execute_sql(&database, "TRUNCATE TABLE users;"),
+            "deleted 1 row(s) from `users`"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
