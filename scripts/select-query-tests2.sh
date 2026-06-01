@@ -3,6 +3,9 @@
 set -euo pipefail
 
 CMD=$1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+source "$SCRIPT_DIR/sql-test-helpers.sh"
 
 echo "--- $0 start ---"
 
@@ -31,16 +34,7 @@ EXPECTED_CASES=(
   $'id\tname\n2\tBob'
 )
 
-for i in "${!SQL_CASES[@]}"; do
-  OUTPUT="$($CMD "${SQL_CASES[$i]}")"
-  EXPECTED="${EXPECTED_CASES[$i]}"
-
-  if [[ "$OUTPUT" != "$EXPECTED" ]]; then
-    printf 'failed: %s\nexpected:\n%s\nactual:\n%s\n' \
-      "${SQL_CASES[$i]}" "$EXPECTED" "$OUTPUT"
-    exit 1
-  fi
-done
+run_sql_cases "$CMD" SQL_CASES EXPECTED_CASES
 
 $CMD "DROP TABLE users;"
 echo "--- $0 finish ---"
