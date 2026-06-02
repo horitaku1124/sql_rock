@@ -17,6 +17,7 @@ SQL_CASES=(
   "SELECT max(age) FROM users;"
   "SELECT min(age) FROM users;"
   "SELECT avg(age) FROM users;"
+  "SELECT sum(age) FROM users;"
 )
 #
 EXPECTED_CASES=(
@@ -28,6 +29,7 @@ $'id	name	age
 $'max(age)\n20'
 $'min(age)\n15'
 $'avg(age)\n17.666666666666668'
+$'sum(age)\n53'
 )
 
 run_sql_cases "$CMD" SQL_CASES EXPECTED_CASES

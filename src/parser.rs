@@ -1,3 +1,4 @@
+use crate::data_type::validate_data_type;
 use crate::error::{Result, SqlRockError};
 use crate::model::{AlterTableAction, Column, SetClause, Statement, WhereClause};
 use crate::query_parser::parse_select_query;
@@ -86,6 +87,7 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
                 "column `{name}` requires a data type"
             )));
         }
+        validate_data_type(&data_type)?;
 
         columns.push(Column {
             name: name.to_string(),
@@ -420,6 +422,7 @@ fn parse_column_definition(sql: &str) -> Result<Column> {
     if data_type.is_empty() {
         return Err(SqlRockError::new("expected column type"));
     }
+    validate_data_type(&data_type)?;
     Ok(Column {
         name: name.to_string(),
         data_type,

@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod data_type;
 pub mod database;
 pub mod error;
 pub mod model;
@@ -74,6 +75,78 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn parses_create_table_with_supported_data_types() {
+        let data_types = [
+            "TINYINT",
+            "SMALLINT",
+            "MEDIUMINT",
+            "INT",
+            "INTEGER",
+            "BIGINT",
+            "DECIMAL(10, 2)",
+            "NUMERIC",
+            "DEC",
+            "FIXED",
+            "FLOAT",
+            "DOUBLE PRECISION",
+            "REAL",
+            "BIT(8)",
+            "DATE",
+            "TIME(6)",
+            "DATETIME",
+            "TIMESTAMP",
+            "YEAR",
+            "CHAR(10)",
+            "VARCHAR(255)",
+            "BINARY(16)",
+            "VARBINARY(255)",
+            "TINYBLOB",
+            "BLOB",
+            "MEDIUMBLOB",
+            "LONGBLOB",
+            "TINYTEXT",
+            "TEXT",
+            "MEDIUMTEXT",
+            "LONGTEXT",
+            "ENUM('a', 'b')",
+            "SET('a', 'b')",
+            "VECTOR(3)",
+            "GEOMETRY",
+            "POINT",
+            "LINESTRING",
+            "POLYGON",
+            "MULTIPOINT",
+            "MULTILINESTRING",
+            "MULTIPOLYGON",
+            "GEOMETRYCOLLECTION",
+            "JSON",
+        ];
+
+        for data_type in data_types {
+            let sql = format!("CREATE TABLE values_table (value {data_type});");
+            assert!(
+                parse_statement(&sql).is_ok(),
+                "{data_type} should be supported"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_create_table_with_unsupported_data_type() {
+        let error = parse_statement("CREATE TABLE users (id INTT);").unwrap_err();
+
+        assert_eq!(error.to_string(), "unsupported data type `INTT`");
+    }
+
+    #[test]
+    fn rejects_alter_table_with_unsupported_data_type() {
+        let error =
+            parse_statement("ALTER TABLE users ADD COLUMN status UNKNOWN_TYPE;").unwrap_err();
+
+        assert_eq!(error.to_string(), "unsupported data type `UNKNOWN_TYPE`");
     }
 
     #[test]

@@ -11,5 +11,6 @@ CMD="./target/debug/sql_rock --data-dir ${DATA_DIR}"
 bash "$BASEDIR/select-query-tests1.sh" "$CMD"
 bash "$BASEDIR/select-query-tests2.sh" "$CMD"
 bash "$BASEDIR/select-query-tests3.sh" "$CMD"
+bash "$BASEDIR/select-query-tests4.sh" "$CMD"
 
 echo ok
