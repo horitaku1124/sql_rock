@@ -8,6 +8,7 @@ pub struct Column {
 pub struct Table {
     pub name: String,
     pub columns: Vec<Column>,
+    pub auto_increment_next: Option<u64>,
     pub rows: Vec<Vec<String>>,
 }
 

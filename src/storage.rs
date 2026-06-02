@@ -17,6 +17,13 @@ pub fn serialize_table(table: &Table) -> String {
             .collect::<Vec<_>>()
             .join("|")
     ));
+    lines.push(format!(
+        "auto_increment:{}",
+        table
+            .auto_increment_next
+            .map(|value| value.to_string())
+            .unwrap_or_default()
+    ));
     lines.push("rows:".to_string());
     lines.extend(table.rows.iter().map(|row| {
         row.iter()
@@ -36,7 +43,7 @@ pub fn parse_table_file(content: &str) -> Result<Table> {
     let Some(columns_line) = lines.next() else {
         return Err(SqlRockError::new("table file is missing columns"));
     };
-    let Some(rows_marker) = lines.next() else {
+    let Some(metadata_or_rows_marker) = lines.next() else {
         return Err(SqlRockError::new("table file is missing rows marker"));
     };
 
@@ -46,6 +53,24 @@ pub fn parse_table_file(content: &str) -> Result<Table> {
     let columns = columns_line
         .strip_prefix("columns:")
         .ok_or_else(|| SqlRockError::new("invalid columns line"))?;
+    let (auto_increment_next, rows_marker) =
+        if let Some(value) = metadata_or_rows_marker.strip_prefix("auto_increment:") {
+            let next = if value.is_empty() {
+                None
+            } else {
+                Some(
+                    value
+                        .parse()
+                        .map_err(|_| SqlRockError::new("invalid auto increment value"))?,
+                )
+            };
+            let rows_marker = lines
+                .next()
+                .ok_or_else(|| SqlRockError::new("table file is missing rows marker"))?;
+            (next, rows_marker)
+        } else {
+            (None, metadata_or_rows_marker)
+        };
     if rows_marker != "rows:" {
         return Err(SqlRockError::new("invalid rows marker"));
     }
@@ -86,6 +111,7 @@ pub fn parse_table_file(content: &str) -> Result<Table> {
     Ok(Table {
         name: unescape_field(name)?,
         columns,
+        auto_increment_next,
         rows,
     })
 }

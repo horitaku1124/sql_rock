@@ -150,6 +150,80 @@ mod tests {
     }
 
     #[test]
+    fn auto_increment_generates_and_persists_sequence_values() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT AUTO_INCREMENT, name TEXT);",
+        );
+
+        execute_sql(&database, "INSERT INTO users (name) VALUES ('Taro');");
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, name) VALUES (NULL, 'Jiro'), (0, 'Saburo');",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, name) VALUES (10, 'Shiro');",
+        );
+        execute_sql(&database, "INSERT INTO users (name) VALUES ('Goro');");
+        execute_sql(&database, "DELETE FROM users WHERE id = 11;");
+        execute_sql(&database, "INSERT INTO users (name) VALUES ('Rokuro');");
+
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM users;"),
+            "id\tname\n1\tTaro\n2\tJiro\n3\tSaburo\n10\tShiro\n12\tRokuro"
+        );
+        assert!(
+            fs::read_to_string(root.join("users.table"))
+                .unwrap()
+                .contains("auto_increment:13\n")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn auto_increment_advances_after_update_and_resets_after_truncate() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT AUTO_INCREMENT, name TEXT);",
+        );
+
+        execute_sql(&database, "INSERT INTO users (name) VALUES ('Taro');");
+        execute_sql(&database, "UPDATE users SET id = 20 WHERE id = 1;");
+        execute_sql(&database, "INSERT INTO users (name) VALUES ('Jiro');");
+        execute_sql(&database, "TRUNCATE TABLE users;");
+        execute_sql(&database, "INSERT INTO users (name) VALUES ('Saburo');");
+
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM users;"),
+            "id\tname\n1\tSaburo"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_auto_increment_definitions() {
+        let error = parse_statement("CREATE TABLE users (id TEXT AUTO_INCREMENT);").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "AUTO_INCREMENT column `id` requires an integer data type"
+        );
+
+        let error = parse_statement(
+            "CREATE TABLE users (id INT AUTO_INCREMENT, serial BIGINT AUTO_INCREMENT);",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "only one AUTO_INCREMENT column is allowed"
+        );
+    }
+
+    #[test]
     fn parses_insert_into() {
         let statement =
             parse_statement("INSERT INTO users (id, name) VALUES (1, 'Alice''s note');").unwrap();
@@ -297,6 +371,15 @@ mod tests {
                 "SELECT * FROM users".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn parses_legacy_table_file_without_auto_increment_metadata() {
+        let table =
+            parse_table_file("table:users\ncolumns:id:INT|name:TEXT\nrows:\n1|Alice\n").unwrap();
+
+        assert_eq!(table.auto_increment_next, None);
+        assert_eq!(table.rows, vec![vec!["1".to_string(), "Alice".to_string()]]);
     }
 
     #[test]
