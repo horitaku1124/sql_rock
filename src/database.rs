@@ -24,7 +24,8 @@ impl Database {
                 name,
                 columns,
                 comment,
-            } => self.create_table(&name, columns, comment),
+                auto_increment_start,
+            } => self.create_table(&name, columns, comment, auto_increment_start),
             Statement::InsertInto {
                 table,
                 columns,
@@ -77,6 +78,7 @@ impl Database {
         name: &str,
         columns: Vec<Column>,
         comment: Option<String>,
+        auto_increment_start: Option<u64>,
     ) -> Result<String> {
         fs::create_dir_all(&self.root)?;
         validate_auto_increment_columns(&columns)?;
@@ -91,7 +93,7 @@ impl Database {
             name: name.to_string(),
             columns,
             comment,
-            auto_increment_next: None,
+            auto_increment_next: auto_increment_start,
             rows: Vec::new(),
         };
         sync_auto_increment_next(&mut table)?;
@@ -239,8 +241,12 @@ impl Database {
             .as_deref()
             .map(|comment| format!(" COMMENT='{}'", comment.replace('\'', "''")))
             .unwrap_or_default();
+        let auto_increment = table
+            .auto_increment_next
+            .map(|value| format!(" AUTO_INCREMENT={value}"))
+            .unwrap_or_default();
         Ok(format!(
-            "Table\tCreate Table\n{table_name}\tCREATE TABLE {table_name} ({columns}){comment}"
+            "Table\tCreate Table\n{table_name}\tCREATE TABLE {table_name} ({columns}){comment}{auto_increment}"
         ))
     }
 

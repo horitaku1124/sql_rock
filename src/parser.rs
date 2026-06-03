@@ -75,7 +75,7 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "create table")?.trim();
     let (table_name, definition, trailing) = split_name_and_parenthesized_with_trailing(rest)?;
     validate_identifier(table_name)?;
-    let comment = parse_table_comment(trailing.trim())?;
+    let table_options = parse_table_options(trailing.trim())?;
 
     let mut columns = Vec::new();
     let mut key_constraints = Vec::new();
@@ -117,16 +117,41 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
     Ok(Statement::CreateTable {
         name: table_name.to_string(),
         columns,
-        comment,
+        comment: table_options.comment,
+        auto_increment_start: table_options.auto_increment_start,
     })
 }
 
-fn parse_table_comment(trailing: &str) -> Result<Option<String>> {
-    if trailing.is_empty() {
-        return Ok(None);
+#[derive(Default)]
+struct TableOptions {
+    comment: Option<String>,
+    auto_increment_start: Option<u64>,
+}
+
+fn parse_table_options(mut trailing: &str) -> Result<TableOptions> {
+    let mut options = TableOptions::default();
+    trailing = trailing.trim();
+    while !trailing.is_empty() {
+        if starts_with_keyword(trailing, "comment") {
+            let (comment, rest) = parse_table_comment_option(trailing)?;
+            options.comment = Some(comment);
+            trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "auto_increment") {
+            let (value, rest) = parse_auto_increment_option(trailing)?;
+            options.auto_increment_start = Some(value);
+            trailing = rest.trim_start();
+        } else {
+            return Err(SqlRockError::new(format!(
+                "unexpected trailing SQL: {trailing}"
+            )));
+        }
     }
 
-    let rest = strip_keyword(trailing, "comment")?.trim_start();
+    Ok(options)
+}
+
+fn parse_table_comment_option(input: &str) -> Result<(String, &str)> {
+    let rest = strip_keyword(input, "comment")?.trim_start();
     let rest = strip_keyword(rest, "=")?.trim_start();
     if !rest.starts_with('\'') {
         return Err(SqlRockError::new("table COMMENT requires a quoted string"));
@@ -143,18 +168,36 @@ fn parse_table_comment(trailing: &str) -> Result<Option<String>> {
                 continue;
             }
 
-            let comment = rest[1..index].replace("''", "'");
-            let trailing = rest[index + 1..].trim();
-            if !trailing.is_empty() {
-                return Err(SqlRockError::new(format!(
-                    "unexpected trailing SQL: {trailing}"
-                )));
-            }
-            return Ok(Some(comment));
+            return Ok((rest[1..index].replace("''", "'"), &rest[index + 1..]));
         }
     }
 
     Err(SqlRockError::new("unterminated table COMMENT"))
+}
+
+fn parse_auto_increment_option(input: &str) -> Result<(u64, &str)> {
+    let rest = strip_keyword(input, "auto_increment")?.trim_start();
+    let rest = strip_keyword(rest, "=")?.trim_start();
+    let value_end = rest
+        .char_indices()
+        .find(|(_, ch)| !ch.is_ascii_digit())
+        .map(|(index, _)| index)
+        .unwrap_or(rest.len());
+    if value_end == 0 {
+        return Err(SqlRockError::new(
+            "table AUTO_INCREMENT requires a positive integer",
+        ));
+    }
+
+    let value = rest[..value_end]
+        .parse()
+        .map_err(|_| SqlRockError::new("invalid table AUTO_INCREMENT value"))?;
+    if value == 0 {
+        return Err(SqlRockError::new(
+            "table AUTO_INCREMENT requires a positive integer",
+        ));
+    }
+    Ok((value, &rest[value_end..]))
 }
 
 enum TableKeyConstraint {

@@ -64,6 +64,7 @@ mod tests {
             Statement::CreateTable {
                 name: "users".to_string(),
                 comment: None,
+                auto_increment_start: None,
                 columns: vec![
                     Column {
                         name: "id".to_string(),
@@ -90,6 +91,7 @@ mod tests {
             Statement::CreateTable {
                 name: "users".to_string(),
                 comment: None,
+                auto_increment_start: None,
                 columns: vec![
                     Column {
                         name: "id".to_string(),
@@ -115,10 +117,38 @@ mod tests {
             Statement::CreateTable {
                 name: "users".to_string(),
                 comment: Some("ユーザー情報'管理".to_string()),
+                auto_increment_start: None,
                 columns: vec![
                     Column {
                         name: "id".to_string(),
                         data_type: "INT".to_string(),
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "TEXT".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_create_table_with_auto_increment_start() {
+        let statement = parse_statement(
+            "CREATE TABLE users (id INT AUTO_INCREMENT, name TEXT) AUTO_INCREMENT=100 COMMENT='users';",
+        )
+        .unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users".to_string(),
+                comment: Some("users".to_string()),
+                auto_increment_start: Some(100),
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT AUTO_INCREMENT".to_string(),
                     },
                     Column {
                         name: "name".to_string(),
@@ -231,6 +261,34 @@ mod tests {
             fs::read_to_string(root.join("users.table"))
                 .unwrap()
                 .contains("auto_increment:13\n")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn auto_increment_uses_create_table_start_value() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT AUTO_INCREMENT, name TEXT) AUTO_INCREMENT=100;",
+        );
+
+        execute_sql(&database, "INSERT INTO users (name) VALUES ('Taro');");
+        execute_sql(&database, "INSERT INTO users (name) VALUES ('Jiro');");
+
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM users;"),
+            "id\tname\n100\tTaro\n101\tJiro"
+        );
+        assert!(
+            fs::read_to_string(root.join("users.table"))
+                .unwrap()
+                .contains("auto_increment:102\n")
+        );
+        assert_eq!(
+            execute_sql(&database, "SHOW CREATE TABLE users;"),
+            "Table\tCreate Table\nusers\tCREATE TABLE users (id INT AUTO_INCREMENT, name TEXT) AUTO_INCREMENT=102"
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -632,6 +690,28 @@ mod tests {
         assert_eq!(
             execute_sql(&database, "SHOW CREATE TABLE users;"),
             "Table\tCreate Table\nusers\tCREATE TABLE users (id INT, name TEXT) COMMENT='user''s table'"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_table_supports_comment_and_auto_increment_options_in_any_order() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT AUTO_INCREMENT, name TEXT) COMMENT='users' AUTO_INCREMENT=50;",
+        );
+
+        execute_sql(&database, "INSERT INTO users (name) VALUES ('Taro');");
+
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM users;"),
+            "id\tname\n50\tTaro"
+        );
+        assert_eq!(
+            execute_sql(&database, "SHOW CREATE TABLE users;"),
+            "Table\tCreate Table\nusers\tCREATE TABLE users (id INT AUTO_INCREMENT, name TEXT) COMMENT='users' AUTO_INCREMENT=51"
         );
         fs::remove_dir_all(root).unwrap();
     }

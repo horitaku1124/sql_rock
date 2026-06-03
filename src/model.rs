@@ -131,6 +131,7 @@ pub enum Statement {
         name: String,
         columns: Vec<Column>,
         comment: Option<String>,
+        auto_increment_start: Option<u64>,
     },
     InsertInto {
         table: String,

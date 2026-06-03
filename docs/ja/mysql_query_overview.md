@@ -255,13 +255,13 @@ MySQL では `AUTO_INCREMENT` 属性を使用すると、新しい行を追加�
 CREATE TABLE users (
     id BIGINT NOT NULL AUTO_INCREMENT,
     name VARCHAR(100)
-);
+) AUTO_INCREMENT=100;
 
 INSERT INTO users (name) VALUES ('Taro');
 INSERT INTO users (name) VALUES ('Jiro');
 ```
 
-上記の `id` には `1`、`2` が順に設定される。
+上記の `id` には `100`、`101` が順に設定される。`AUTO_INCREMENT=100` を省略した場合は、初期値に `1` を指定したものとして扱う。
 
 MySQL の主な仕様は次のとおり。
 
@@ -271,6 +271,7 @@ MySQL の主な仕様は次のとおり。
 - `0` を指定した場合も連番が生成される。ただし、MySQL では `NO_AUTO_VALUE_ON_ZERO` SQL モードを有効にすると挙動が変わる。
 - `NOT NULL` のカラムに `NULL` を指定した場合も連番が生成される。
 - 現在値より大きい値を明示的に登録すると、次回はその値に続く番号が生成される。
+- `CREATE TABLE ... AUTO_INCREMENT=n` で初期値を指定できる。
 - 負数は使用できない。
 - 必要な最大値を格納できる、できるだけ小さい整数型を選択する。必要に応じて `UNSIGNED` を使用する。
 - MySQL では浮動小数点型にも指定できるが、`FLOAT` と `DOUBLE` に対する指定は非推奨。
@@ -279,6 +280,8 @@ MySQL の主な仕様は次のとおり。
 このプロジェクトでは、次の範囲をサポートする。
 
 - 整数型のカラムに対する `AUTO_INCREMENT` 指定。
+- `CREATE TABLE table_name (...) AUTO_INCREMENT=n` 形式の初期値指定。
+- 初期値を省略した場合の `1` からの採番。
 - 値を省略した場合、`NULL` を指定した場合、または `0` を指定した場合の連番生成。
 - 大きい整数値を明示的に登録または更新した場合の、次回採番値の更新。
 - `DELETE` 後の採番値の維持と、`TRUNCATE TABLE` 後の `1` へのリセット。
