@@ -1,6 +1,6 @@
-use crate::data_type::{has_auto_increment, validate_auto_increment_columns};
+use crate::data_type::{has_auto_increment, has_not_null, validate_auto_increment_columns};
 use crate::error::{Result, SqlRockError};
-use crate::model::{AlterTableAction, Column, SetClause, Statement, Table, WhereClause};
+use crate::model::{AlterTableAction, Column, SQL_NULL, SetClause, Statement, Table, WhereClause};
 use crate::query_engine::execute_query;
 use crate::storage::{parse_table_file, serialize_table};
 use std::fs;
@@ -103,13 +103,17 @@ impl Database {
         let path = self.existing_table_path(table_name)?;
         let mut table = parse_table_file(&fs::read_to_string(&path)?)?;
         let mut row = vec![String::new(); table.columns.len()];
+        let mut provided = vec![false; table.columns.len()];
 
         for (column_name, value) in columns.iter().zip(values.into_iter()) {
             let index = column_index(&table, column_name, table_name)?;
             row[index] = value;
+            provided[index] = true;
         }
 
         apply_auto_increment(&mut table, &mut row)?;
+        validate_not_null_values(&table, &row, &provided)?;
+        normalize_null_values(&mut row);
         table.rows.push(row);
         fs::write(path, serialize_table(&table))?;
 
@@ -335,7 +339,8 @@ impl Database {
         let mut updated_count = 0;
         for row in &mut table.rows {
             if row.get(where_index) == Some(&where_clause.value) {
-                row[set_index] = set_clause.value.clone();
+                let value = normalize_updated_value(&table.columns[set_index], &set_clause.value)?;
+                row[set_index] = value;
                 updated_count += 1;
             }
         }
@@ -355,14 +360,20 @@ impl Database {
         let mut table = parse_table_file(&fs::read_to_string(&path)?)?;
         let updates = set_clauses
             .iter()
-            .map(|set| Ok((column_index(&table, &set.column, table_name)?, &set.value)))
+            .map(|set| {
+                let index = column_index(&table, &set.column, table_name)?;
+                Ok((
+                    index,
+                    normalize_updated_value(&table.columns[index], &set.value)?,
+                ))
+            })
             .collect::<Result<Vec<_>>>()?;
         let where_index = column_index(&table, &where_clause.column, table_name)?;
         let mut updated_count = 0;
         for row in &mut table.rows {
             if row.get(where_index) == Some(&where_clause.value) {
                 for (index, value) in &updates {
-                    row[*index] = (*value).clone();
+                    row[*index] = value.clone();
                 }
                 updated_count += 1;
             }
@@ -399,7 +410,7 @@ fn apply_auto_increment(table: &mut Table, row: &mut [String]) -> Result<()> {
         return Ok(());
     };
 
-    if row[index].is_empty() || row[index] == "0" {
+    if row[index].is_empty() || row[index] == "0" || row[index] == SQL_NULL {
         let value = table.auto_increment_next.unwrap_or(1);
         row[index] = value.to_string();
         table.auto_increment_next = Some(increment_auto_value(value)?);
@@ -410,6 +421,41 @@ fn apply_auto_increment(table: &mut Table, row: &mut [String]) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_not_null_values(table: &Table, row: &[String], provided: &[bool]) -> Result<()> {
+    for (index, column) in table.columns.iter().enumerate() {
+        if has_not_null(&column.data_type)
+            && (!provided[index] || row.get(index).is_some_and(|value| value == SQL_NULL))
+        {
+            return Err(SqlRockError::new(format!(
+                "column `{}` cannot be NULL",
+                column.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_null_values(row: &mut [String]) {
+    for value in row {
+        if value == SQL_NULL {
+            value.clear();
+        }
+    }
+}
+
+fn normalize_updated_value(column: &Column, value: &str) -> Result<String> {
+    if value == SQL_NULL {
+        if has_not_null(&column.data_type) {
+            return Err(SqlRockError::new(format!(
+                "column `{}` cannot be NULL",
+                column.name
+            )));
+        }
+        return Ok(String::new());
+    }
+    Ok(value.to_string())
 }
 
 fn sync_auto_increment_next(table: &mut Table) -> Result<()> {

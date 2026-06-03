@@ -89,6 +89,13 @@ pub fn has_auto_increment(data_type: &str) -> bool {
         .any(|part| part.eq_ignore_ascii_case("AUTO_INCREMENT"))
 }
 
+pub fn has_not_null(data_type: &str) -> bool {
+    let parts = data_type.split_whitespace().collect::<Vec<_>>();
+    parts.windows(2).any(|window| {
+        window[0].eq_ignore_ascii_case("NOT") && window[1].eq_ignore_ascii_case("NULL")
+    })
+}
+
 fn data_type_name(data_type: &str) -> String {
     data_type
         .trim()

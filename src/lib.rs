@@ -224,6 +224,83 @@ mod tests {
     }
 
     #[test]
+    fn rejects_null_insert_into_not_null_column() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT, name TEXT NOT NULL);",
+        );
+
+        let error = database
+            .execute(parse_statement("INSERT INTO users (id, name) VALUES (1, NULL);").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "column `name` cannot be NULL");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_omitted_insert_into_not_null_column() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT, name TEXT NOT NULL);",
+        );
+
+        let error = database
+            .execute(parse_statement("INSERT INTO users (id) VALUES (1);").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "column `name` cannot be NULL");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn allows_empty_string_insert_into_not_null_column() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT, name TEXT NOT NULL);",
+        );
+
+        execute_sql(&database, "INSERT INTO users (id, name) VALUES (1, '');");
+
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM users;"),
+            "id\tname\n1\t"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_null_update_into_not_null_column() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT, name TEXT NOT NULL);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, name) VALUES (1, 'Taro');",
+        );
+
+        let error = database
+            .execute(parse_statement("UPDATE users SET name = NULL WHERE id = 1;").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "column `name` cannot be NULL");
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM users;"),
+            "id\tname\n1\tTaro"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn parses_insert_into() {
         let statement =
             parse_statement("INSERT INTO users (id, name) VALUES (1, 'Alice''s note');").unwrap();

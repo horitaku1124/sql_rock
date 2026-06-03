@@ -1,6 +1,6 @@
 use crate::data_type::{validate_auto_increment_columns, validate_data_type};
 use crate::error::{Result, SqlRockError};
-use crate::model::{AlterTableAction, Column, SetClause, Statement, WhereClause};
+use crate::model::{AlterTableAction, Column, SQL_NULL, SetClause, Statement, WhereClause};
 use crate::query_parser::parse_select_query;
 
 pub fn parse_statement(sql: &str) -> Result<Statement> {
@@ -469,7 +469,7 @@ fn parse_set_clause(sql: &str) -> Result<SetClause> {
 fn parse_value(value: &str) -> Result<String> {
     let value = value.trim();
     if value.eq_ignore_ascii_case("null") {
-        return Ok(String::new());
+        return Ok(SQL_NULL.to_string());
     }
 
     if value.starts_with('\'') {

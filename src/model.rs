@@ -1,3 +1,5 @@
+pub const SQL_NULL: &str = "\0NULL";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Column {
     pub name: String,
