@@ -3,7 +3,9 @@ use crate::data_type::{
     validate_key_columns,
 };
 use crate::error::{Result, SqlRockError};
-use crate::model::{AlterTableAction, Column, SQL_NULL, SetClause, Statement, WhereClause};
+use crate::model::{
+    AlterTableAction, Column, SQL_NULL, SetClause, Statement, TableOption, WhereClause,
+};
 use crate::query_parser::parse_select_query;
 
 pub fn parse_statement(sql: &str) -> Result<Statement> {
@@ -118,6 +120,7 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
         name: table_name.to_string(),
         columns,
         comment: table_options.comment,
+        options: table_options.options,
         auto_increment_start: table_options.auto_increment_start,
     })
 }
@@ -125,6 +128,7 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
 #[derive(Default)]
 struct TableOptions {
     comment: Option<String>,
+    options: Vec<TableOption>,
     auto_increment_start: Option<u64>,
 }
 
@@ -139,6 +143,34 @@ fn parse_table_options(mut trailing: &str) -> Result<TableOptions> {
         } else if starts_with_keyword(trailing, "auto_increment") {
             let (value, rest) = parse_auto_increment_option(trailing)?;
             options.auto_increment_start = Some(value);
+            trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "character set") {
+            let (value, rest) = parse_table_value_option(trailing, "character set")?;
+            options.options.push(TableOption {
+                name: "CHARACTER SET".to_string(),
+                value,
+            });
+            trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "collate") {
+            let (value, rest) = parse_table_value_option(trailing, "collate")?;
+            options.options.push(TableOption {
+                name: "COLLATE".to_string(),
+                value,
+            });
+            trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "engine") {
+            let (value, rest) = parse_table_value_option(trailing, "engine")?;
+            options.options.push(TableOption {
+                name: "ENGINE".to_string(),
+                value,
+            });
+            trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "checksum") {
+            let (value, rest) = parse_table_value_option(trailing, "checksum")?;
+            options.options.push(TableOption {
+                name: "CHECKSUM".to_string(),
+                value,
+            });
             trailing = rest.trim_start();
         } else {
             return Err(SqlRockError::new(format!(
@@ -198,6 +230,24 @@ fn parse_auto_increment_option(input: &str) -> Result<(u64, &str)> {
         ));
     }
     Ok((value, &rest[value_end..]))
+}
+
+fn parse_table_value_option<'a>(input: &'a str, keyword: &str) -> Result<(String, &'a str)> {
+    let rest = strip_keyword(input, keyword)?.trim_start();
+    let rest = strip_keyword(rest, "=")?.trim_start();
+    let value_end = rest
+        .char_indices()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(index, _)| index)
+        .unwrap_or(rest.len());
+    if value_end == 0 {
+        return Err(SqlRockError::new(format!(
+            "table {} requires a value",
+            keyword.to_ascii_uppercase()
+        )));
+    }
+
+    Ok((rest[..value_end].to_string(), &rest[value_end..]))
 }
 
 enum TableKeyConstraint {

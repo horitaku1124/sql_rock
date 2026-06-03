@@ -24,8 +24,9 @@ impl Database {
                 name,
                 columns,
                 comment,
+                options,
                 auto_increment_start,
-            } => self.create_table(&name, columns, comment, auto_increment_start),
+            } => self.create_table(&name, columns, comment, options, auto_increment_start),
             Statement::InsertInto {
                 table,
                 columns,
@@ -78,6 +79,7 @@ impl Database {
         name: &str,
         columns: Vec<Column>,
         comment: Option<String>,
+        options: Vec<crate::model::TableOption>,
         auto_increment_start: Option<u64>,
     ) -> Result<String> {
         fs::create_dir_all(&self.root)?;
@@ -93,6 +95,7 @@ impl Database {
             name: name.to_string(),
             columns,
             comment,
+            options,
             auto_increment_next: auto_increment_start,
             rows: Vec::new(),
         };
@@ -245,8 +248,13 @@ impl Database {
             .auto_increment_next
             .map(|value| format!(" AUTO_INCREMENT={value}"))
             .unwrap_or_default();
+        let options = table
+            .options
+            .iter()
+            .map(|option| format!(" {}={}", option.name, option.value))
+            .collect::<String>();
         Ok(format!(
-            "Table\tCreate Table\n{table_name}\tCREATE TABLE {table_name} ({columns}){comment}{auto_increment}"
+            "Table\tCreate Table\n{table_name}\tCREATE TABLE {table_name} ({columns}){comment}{auto_increment}{options}"
         ))
     }
 

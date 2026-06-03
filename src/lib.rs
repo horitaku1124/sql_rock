@@ -11,7 +11,7 @@ pub mod storage;
 #[cfg(test)]
 mod tests {
     use crate::database::Database;
-    use crate::model::{Column, SetClause, Statement, WhereClause};
+    use crate::model::{Column, SetClause, Statement, TableOption, WhereClause};
     use crate::parser::{parse_statement, split_statements};
     use crate::storage::parse_table_file;
     use std::env;
@@ -64,6 +64,7 @@ mod tests {
             Statement::CreateTable {
                 name: "users".to_string(),
                 comment: None,
+                options: Vec::new(),
                 auto_increment_start: None,
                 columns: vec![
                     Column {
@@ -91,6 +92,7 @@ mod tests {
             Statement::CreateTable {
                 name: "users".to_string(),
                 comment: None,
+                options: Vec::new(),
                 auto_increment_start: None,
                 columns: vec![
                     Column {
@@ -117,6 +119,7 @@ mod tests {
             Statement::CreateTable {
                 name: "users".to_string(),
                 comment: Some("ユーザー情報'管理".to_string()),
+                options: Vec::new(),
                 auto_increment_start: None,
                 columns: vec![
                     Column {
@@ -144,6 +147,7 @@ mod tests {
             Statement::CreateTable {
                 name: "users".to_string(),
                 comment: Some("users".to_string()),
+                options: Vec::new(),
                 auto_increment_start: Some(100),
                 columns: vec![
                     Column {
@@ -155,6 +159,45 @@ mod tests {
                         data_type: "TEXT".to_string(),
                     },
                 ],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_create_table_with_passive_table_options() {
+        let statement = parse_statement(
+            "CREATE TABLE users (id INT) CHARACTER SET=utf8mb4 COLLATE=utf8mb4_bin ENGINE=InnoDB CHECKSUM=0;",
+        )
+        .unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users".to_string(),
+                comment: None,
+                options: vec![
+                    TableOption {
+                        name: "CHARACTER SET".to_string(),
+                        value: "utf8mb4".to_string(),
+                    },
+                    TableOption {
+                        name: "COLLATE".to_string(),
+                        value: "utf8mb4_bin".to_string(),
+                    },
+                    TableOption {
+                        name: "ENGINE".to_string(),
+                        value: "InnoDB".to_string(),
+                    },
+                    TableOption {
+                        name: "CHECKSUM".to_string(),
+                        value: "0".to_string(),
+                    },
+                ],
+                auto_increment_start: None,
+                columns: vec![Column {
+                    name: "id".to_string(),
+                    data_type: "INT".to_string(),
+                }],
             }
         );
     }
@@ -665,6 +708,7 @@ mod tests {
             parse_table_file("table:users\ncolumns:id:INT|name:TEXT\nrows:\n1|Alice\n").unwrap();
 
         assert_eq!(table.comment, None);
+        assert_eq!(table.options, Vec::new());
         assert_eq!(table.auto_increment_next, None);
         assert_eq!(table.rows, vec![vec!["1".to_string(), "Alice".to_string()]]);
     }
@@ -690,6 +734,53 @@ mod tests {
         assert_eq!(
             execute_sql(&database, "SHOW CREATE TABLE users;"),
             "Table\tCreate Table\nusers\tCREATE TABLE users (id INT, name TEXT) COMMENT='user''s table'"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stores_and_shows_passive_table_options() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT, name TEXT) CHARACTER SET=utf8mb4 COLLATE=utf8mb4_bin ENGINE=InnoDB CHECKSUM=0;",
+        );
+
+        let table =
+            parse_table_file(&fs::read_to_string(root.join("users.table")).unwrap()).unwrap();
+
+        assert_eq!(
+            table.options,
+            vec![
+                TableOption {
+                    name: "CHARACTER SET".to_string(),
+                    value: "utf8mb4".to_string(),
+                },
+                TableOption {
+                    name: "COLLATE".to_string(),
+                    value: "utf8mb4_bin".to_string(),
+                },
+                TableOption {
+                    name: "ENGINE".to_string(),
+                    value: "InnoDB".to_string(),
+                },
+                TableOption {
+                    name: "CHECKSUM".to_string(),
+                    value: "0".to_string(),
+                },
+            ]
+        );
+        assert!(
+            fs::read_to_string(root.join("users.table"))
+                .unwrap()
+                .contains(
+                    "options:CHARACTER SET:utf8mb4|COLLATE:utf8mb4_bin|ENGINE:InnoDB|CHECKSUM:0\n"
+                )
+        );
+        assert_eq!(
+            execute_sql(&database, "SHOW CREATE TABLE users;"),
+            "Table\tCreate Table\nusers\tCREATE TABLE users (id INT, name TEXT) CHARACTER SET=utf8mb4 COLLATE=utf8mb4_bin ENGINE=InnoDB CHECKSUM=0"
         );
         fs::remove_dir_all(root).unwrap();
     }
