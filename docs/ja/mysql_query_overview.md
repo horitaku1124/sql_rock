@@ -193,6 +193,24 @@ CREATE TABLE users (
 );
 ```
 
+テーブル全体の説明は、`COMMENT='...'` で任意に指定できる。
+
+```sql
+CREATE TABLE users (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL
+) COMMENT='ユーザー情報を管理するテーブル';
+```
+
+このプロジェクトでは、次の範囲をサポートする。
+
+- `CREATE TABLE table_name (...) COMMENT='comment'` 形式のテーブルコメント。
+- コメントを省略した `CREATE TABLE table_name (...)`。
+- テーブルファイルへのコメント保存。
+- `SHOW CREATE TABLE` でのコメント表示。
+
+カラムコメント、二重引用符で囲んだコメント、テーブル作成後のコメント変更には未対応。
+
 ### PRIMARY KEY / UNIQUE KEY
 
 `PRIMARY KEY` はテーブル内の行を一意に識別するためのキーで、重複値を許可しない。`PRIMARY KEY` に指定したカラムは `NOT NULL` として扱われる。

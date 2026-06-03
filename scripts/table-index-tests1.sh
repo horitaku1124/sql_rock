@@ -66,4 +66,5 @@ run_sql_error_cases "$CMD" ERROR_SQL_CASES ERROR_EXPECTED_CASES
 
 
 $CMD "DROP TABLE items;"
+$CMD "DROP TABLE items2;"
 echo "--- $0 finish ---"

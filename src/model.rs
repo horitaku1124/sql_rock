@@ -10,6 +10,7 @@ pub struct Column {
 pub struct Table {
     pub name: String,
     pub columns: Vec<Column>,
+    pub comment: Option<String>,
     pub auto_increment_next: Option<u64>,
     pub rows: Vec<Vec<String>>,
 }
@@ -129,6 +130,7 @@ pub enum Statement {
     CreateTable {
         name: String,
         columns: Vec<Column>,
+        comment: Option<String>,
     },
     InsertInto {
         table: String,

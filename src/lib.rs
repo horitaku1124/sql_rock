@@ -63,6 +63,7 @@ mod tests {
             statement,
             Statement::CreateTable {
                 name: "users".to_string(),
+                comment: None,
                 columns: vec![
                     Column {
                         name: "id".to_string(),
@@ -88,6 +89,7 @@ mod tests {
             statement,
             Statement::CreateTable {
                 name: "users".to_string(),
+                comment: None,
                 columns: vec![
                     Column {
                         name: "id".to_string(),
@@ -96,6 +98,31 @@ mod tests {
                     Column {
                         name: "email".to_string(),
                         data_type: "TEXT UNIQUE KEY".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_create_table_with_table_comment() {
+        let statement =
+            parse_statement("CREATE TABLE users (id INT, name TEXT) COMMENT='ユーザー情報''管理';")
+                .unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users".to_string(),
+                comment: Some("ユーザー情報'管理".to_string()),
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT".to_string(),
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "TEXT".to_string(),
                     },
                 ],
             }
@@ -579,8 +606,34 @@ mod tests {
         let table =
             parse_table_file("table:users\ncolumns:id:INT|name:TEXT\nrows:\n1|Alice\n").unwrap();
 
+        assert_eq!(table.comment, None);
         assert_eq!(table.auto_increment_next, None);
         assert_eq!(table.rows, vec![vec!["1".to_string(), "Alice".to_string()]]);
+    }
+
+    #[test]
+    fn stores_and_reads_table_comment() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT, name TEXT) COMMENT='user''s table';",
+        );
+
+        let table =
+            parse_table_file(&fs::read_to_string(root.join("users.table")).unwrap()).unwrap();
+
+        assert_eq!(table.comment, Some("user's table".to_string()));
+        assert!(
+            fs::read_to_string(root.join("users.table"))
+                .unwrap()
+                .contains("comment:user's table\n")
+        );
+        assert_eq!(
+            execute_sql(&database, "SHOW CREATE TABLE users;"),
+            "Table\tCreate Table\nusers\tCREATE TABLE users (id INT, name TEXT) COMMENT='user''s table'"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

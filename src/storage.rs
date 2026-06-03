@@ -18,6 +18,14 @@ pub fn serialize_table(table: &Table) -> String {
             .join("|")
     ));
     lines.push(format!(
+        "comment:{}",
+        table
+            .comment
+            .as_deref()
+            .map(escape_field)
+            .unwrap_or_default()
+    ));
+    lines.push(format!(
         "auto_increment:{}",
         table
             .auto_increment_next
@@ -53,6 +61,17 @@ pub fn parse_table_file(content: &str) -> Result<Table> {
     let columns = columns_line
         .strip_prefix("columns:")
         .ok_or_else(|| SqlRockError::new("invalid columns line"))?;
+    let mut comment = None;
+    let mut metadata_or_rows_marker = metadata_or_rows_marker;
+    if let Some(value) = metadata_or_rows_marker.strip_prefix("comment:") {
+        if !value.is_empty() {
+            comment = Some(unescape_field(value)?);
+        }
+        metadata_or_rows_marker = lines
+            .next()
+            .ok_or_else(|| SqlRockError::new("table file is missing rows marker"))?;
+    }
+
     let (auto_increment_next, rows_marker) =
         if let Some(value) = metadata_or_rows_marker.strip_prefix("auto_increment:") {
             let next = if value.is_empty() {
@@ -111,6 +130,7 @@ pub fn parse_table_file(content: &str) -> Result<Table> {
     Ok(Table {
         name: unescape_field(name)?,
         columns,
+        comment,
         auto_increment_next,
         rows,
     })

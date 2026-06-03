@@ -20,7 +20,11 @@ impl Database {
 
     pub fn execute(&self, statement: Statement) -> Result<String> {
         match statement {
-            Statement::CreateTable { name, columns } => self.create_table(&name, columns),
+            Statement::CreateTable {
+                name,
+                columns,
+                comment,
+            } => self.create_table(&name, columns, comment),
             Statement::InsertInto {
                 table,
                 columns,
@@ -68,7 +72,12 @@ impl Database {
         }
     }
 
-    fn create_table(&self, name: &str, columns: Vec<Column>) -> Result<String> {
+    fn create_table(
+        &self,
+        name: &str,
+        columns: Vec<Column>,
+        comment: Option<String>,
+    ) -> Result<String> {
         fs::create_dir_all(&self.root)?;
         validate_auto_increment_columns(&columns)?;
         validate_key_columns(&columns)?;
@@ -81,6 +90,7 @@ impl Database {
         let mut table = Table {
             name: name.to_string(),
             columns,
+            comment,
             auto_increment_next: None,
             rows: Vec::new(),
         };
@@ -224,8 +234,13 @@ impl Database {
             .map(|column| format!("{} {}", column.name, column.data_type))
             .collect::<Vec<_>>()
             .join(", ");
+        let comment = table
+            .comment
+            .as_deref()
+            .map(|comment| format!(" COMMENT='{}'", comment.replace('\'', "''")))
+            .unwrap_or_default();
         Ok(format!(
-            "Table\tCreate Table\n{table_name}\tCREATE TABLE {table_name} ({columns})"
+            "Table\tCreate Table\n{table_name}\tCREATE TABLE {table_name} ({columns}){comment}"
         ))
     }
 

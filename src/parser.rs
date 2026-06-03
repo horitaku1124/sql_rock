@@ -73,8 +73,9 @@ pub fn split_statements(sql: &str) -> Vec<String> {
 
 fn parse_create_table(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "create table")?.trim();
-    let (table_name, definition) = split_name_and_parenthesized(rest)?;
+    let (table_name, definition, trailing) = split_name_and_parenthesized_with_trailing(rest)?;
     validate_identifier(table_name)?;
+    let comment = parse_table_comment(trailing.trim())?;
 
     let mut columns = Vec::new();
     let mut key_constraints = Vec::new();
@@ -116,7 +117,44 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
     Ok(Statement::CreateTable {
         name: table_name.to_string(),
         columns,
+        comment,
     })
+}
+
+fn parse_table_comment(trailing: &str) -> Result<Option<String>> {
+    if trailing.is_empty() {
+        return Ok(None);
+    }
+
+    let rest = strip_keyword(trailing, "comment")?.trim_start();
+    let rest = strip_keyword(rest, "=")?.trim_start();
+    if !rest.starts_with('\'') {
+        return Err(SqlRockError::new("table COMMENT requires a quoted string"));
+    }
+
+    let mut chars = rest.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if ch == '\'' {
+            if index == 0 {
+                continue;
+            }
+            if chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                chars.next();
+                continue;
+            }
+
+            let comment = rest[1..index].replace("''", "'");
+            let trailing = rest[index + 1..].trim();
+            if !trailing.is_empty() {
+                return Err(SqlRockError::new(format!(
+                    "unexpected trailing SQL: {trailing}"
+                )));
+            }
+            return Ok(Some(comment));
+        }
+    }
+
+    Err(SqlRockError::new("unterminated table COMMENT"))
 }
 
 enum TableKeyConstraint {
@@ -589,17 +627,11 @@ fn parse_value(value: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-fn split_name_and_parenthesized(input: &str) -> Result<(&str, &str)> {
+fn split_name_and_parenthesized_with_trailing(input: &str) -> Result<(&str, &str, &str)> {
     let (name, rest) = split_leading_identifier(input)?;
     let rest = rest.trim_start();
     let (inside, trailing) = take_parenthesized(rest)?;
-    if !trailing.trim().is_empty() {
-        return Err(SqlRockError::new(format!(
-            "unexpected trailing SQL: {}",
-            trailing.trim()
-        )));
-    }
-    Ok((name, inside))
+    Ok((name, inside, trailing))
 }
 
 fn split_leading_identifier(input: &str) -> Result<(&str, &str)> {
