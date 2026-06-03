@@ -13,5 +13,6 @@ bash "$BASEDIR/select-query-tests2.sh" "$CMD"
 bash "$BASEDIR/select-query-tests3.sh" "$CMD"
 bash "$BASEDIR/select-query-tests4.sh" "$CMD"
 bash "$BASEDIR/select-query-tests5.sh" "$CMD"
+bash "$BASEDIR/select-query-tests6.sh" "$CMD"
 
 echo ok
