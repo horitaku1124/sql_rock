@@ -1,5 +1,6 @@
+use crate::data_type::{has_auto_increment, has_not_null, validate_auto_increment_columns};
 use crate::error::{Result, SqlRockError};
-use crate::model::{AlterTableAction, Column, SetClause, Statement, Table, WhereClause};
+use crate::model::{AlterTableAction, Column, SQL_NULL, SetClause, Statement, Table, WhereClause};
 use crate::query_engine::execute_query;
 use crate::storage::{parse_table_file, serialize_table};
 use std::fs;
@@ -47,7 +48,7 @@ impl Database {
                 where_clause,
             } => self.delete_from(&table, where_clause),
             Statement::DeleteAll { table } => self.delete_all(&table),
-            Statement::TruncateTable { table } => self.delete_all(&table),
+            Statement::TruncateTable { table } => self.truncate_table(&table),
             Statement::Update {
                 table,
                 set_clause,
@@ -66,17 +67,20 @@ impl Database {
 
     fn create_table(&self, name: &str, columns: Vec<Column>) -> Result<String> {
         fs::create_dir_all(&self.root)?;
+        validate_auto_increment_columns(&columns)?;
 
         let path = self.table_path(name)?;
         if path.exists() {
             return Err(SqlRockError::new(format!("table `{name}` already exists")));
         }
 
-        let table = Table {
+        let mut table = Table {
             name: name.to_string(),
             columns,
+            auto_increment_next: None,
             rows: Vec::new(),
         };
+        sync_auto_increment_next(&mut table)?;
         fs::write(path, serialize_table(&table))?;
 
         Ok(format!("created table `{name}`"))
@@ -99,12 +103,17 @@ impl Database {
         let path = self.existing_table_path(table_name)?;
         let mut table = parse_table_file(&fs::read_to_string(&path)?)?;
         let mut row = vec![String::new(); table.columns.len()];
+        let mut provided = vec![false; table.columns.len()];
 
         for (column_name, value) in columns.iter().zip(values.into_iter()) {
             let index = column_index(&table, column_name, table_name)?;
             row[index] = value;
+            provided[index] = true;
         }
 
+        apply_auto_increment(&mut table, &mut row)?;
+        validate_not_null_values(&table, &row, &provided)?;
+        normalize_null_values(&mut row);
         table.rows.push(row);
         fs::write(path, serialize_table(&table))?;
 
@@ -238,6 +247,8 @@ impl Database {
                 table.columns[index] = column;
             }
         }
+        validate_auto_increment_columns(&table.columns)?;
+        sync_auto_increment_next(&mut table)?;
         fs::write(path, serialize_table(&table))?;
         Ok(format!("altered table `{table_name}`"))
     }
@@ -302,6 +313,18 @@ impl Database {
         ))
     }
 
+    fn truncate_table(&self, table_name: &str) -> Result<String> {
+        let path = self.existing_table_path(table_name)?;
+        let mut table = parse_table_file(&fs::read_to_string(&path)?)?;
+        let deleted_count = table.rows.len();
+        table.rows.clear();
+        table.auto_increment_next = auto_increment_index(&table).map(|_| 1);
+        fs::write(path, serialize_table(&table))?;
+        Ok(format!(
+            "deleted {deleted_count} row(s) from `{table_name}`"
+        ))
+    }
+
     fn update_rows(
         &self,
         table_name: &str,
@@ -316,11 +339,13 @@ impl Database {
         let mut updated_count = 0;
         for row in &mut table.rows {
             if row.get(where_index) == Some(&where_clause.value) {
-                row[set_index] = set_clause.value.clone();
+                let value = normalize_updated_value(&table.columns[set_index], &set_clause.value)?;
+                row[set_index] = value;
                 updated_count += 1;
             }
         }
 
+        sync_auto_increment_next(&mut table)?;
         fs::write(path, serialize_table(&table))?;
         Ok(format!("updated {updated_count} row(s) in `{table_name}`"))
     }
@@ -335,18 +360,25 @@ impl Database {
         let mut table = parse_table_file(&fs::read_to_string(&path)?)?;
         let updates = set_clauses
             .iter()
-            .map(|set| Ok((column_index(&table, &set.column, table_name)?, &set.value)))
+            .map(|set| {
+                let index = column_index(&table, &set.column, table_name)?;
+                Ok((
+                    index,
+                    normalize_updated_value(&table.columns[index], &set.value)?,
+                ))
+            })
             .collect::<Result<Vec<_>>>()?;
         let where_index = column_index(&table, &where_clause.column, table_name)?;
         let mut updated_count = 0;
         for row in &mut table.rows {
             if row.get(where_index) == Some(&where_clause.value) {
                 for (index, value) in &updates {
-                    row[*index] = (*value).clone();
+                    row[*index] = value.clone();
                 }
                 updated_count += 1;
             }
         }
+        sync_auto_increment_next(&mut table)?;
         fs::write(path, serialize_table(&table))?;
         Ok(format!("updated {updated_count} row(s) in `{table_name}`"))
     }
@@ -371,6 +403,94 @@ impl Database {
         validate_identifier(table_name)?;
         Ok(self.root.join(format!("{table_name}.table")))
     }
+}
+
+fn apply_auto_increment(table: &mut Table, row: &mut [String]) -> Result<()> {
+    let Some(index) = auto_increment_index(table) else {
+        return Ok(());
+    };
+
+    if row[index].is_empty() || row[index] == "0" || row[index] == SQL_NULL {
+        let value = table.auto_increment_next.unwrap_or(1);
+        row[index] = value.to_string();
+        table.auto_increment_next = Some(increment_auto_value(value)?);
+    } else {
+        let value = parse_auto_increment_value(&row[index])?;
+        let next = increment_auto_value(value)?;
+        table.auto_increment_next = Some(table.auto_increment_next.unwrap_or(1).max(next));
+    }
+
+    Ok(())
+}
+
+fn validate_not_null_values(table: &Table, row: &[String], provided: &[bool]) -> Result<()> {
+    for (index, column) in table.columns.iter().enumerate() {
+        if has_not_null(&column.data_type)
+            && (!provided[index] || row.get(index).is_some_and(|value| value == SQL_NULL))
+        {
+            return Err(SqlRockError::new(format!(
+                "column `{}` cannot be NULL",
+                column.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_null_values(row: &mut [String]) {
+    for value in row {
+        if value == SQL_NULL {
+            value.clear();
+        }
+    }
+}
+
+fn normalize_updated_value(column: &Column, value: &str) -> Result<String> {
+    if value == SQL_NULL {
+        if has_not_null(&column.data_type) {
+            return Err(SqlRockError::new(format!(
+                "column `{}` cannot be NULL",
+                column.name
+            )));
+        }
+        return Ok(String::new());
+    }
+    Ok(value.to_string())
+}
+
+fn sync_auto_increment_next(table: &mut Table) -> Result<()> {
+    let Some(index) = auto_increment_index(table) else {
+        table.auto_increment_next = None;
+        return Ok(());
+    };
+
+    let mut next = table.auto_increment_next.unwrap_or(1);
+    for row in &table.rows {
+        if let Some(value) = row.get(index).filter(|value| !value.is_empty()) {
+            next = next.max(increment_auto_value(parse_auto_increment_value(value)?)?);
+        }
+    }
+    table.auto_increment_next = Some(next);
+    Ok(())
+}
+
+fn auto_increment_index(table: &Table) -> Option<usize> {
+    table
+        .columns
+        .iter()
+        .position(|column| has_auto_increment(&column.data_type))
+}
+
+fn parse_auto_increment_value(value: &str) -> Result<u64> {
+    value
+        .parse()
+        .map_err(|_| SqlRockError::new(format!("invalid AUTO_INCREMENT value `{value}`")))
+}
+
+fn increment_auto_value(value: u64) -> Result<u64> {
+    value
+        .checked_add(1)
+        .ok_or_else(|| SqlRockError::new("AUTO_INCREMENT value is out of range"))
 }
 
 fn column_index(table: &Table, column_name: &str, table_name: &str) -> Result<usize> {
