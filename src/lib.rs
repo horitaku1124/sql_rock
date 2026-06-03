@@ -78,6 +78,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_create_table_with_primary_key_and_unique_key() {
+        let statement = parse_statement(
+            "CREATE TABLE users (id INT, email TEXT, PRIMARY KEY (id), UNIQUE KEY unique_email (email));",
+        )
+        .unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users".to_string(),
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT PRIMARY KEY".to_string(),
+                    },
+                    Column {
+                        name: "email".to_string(),
+                        data_type: "TEXT UNIQUE KEY".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn parses_create_table_with_supported_data_types() {
         let data_types = [
             "TINYINT",
@@ -221,6 +246,105 @@ mod tests {
             error.to_string(),
             "only one AUTO_INCREMENT column is allowed"
         );
+    }
+
+    #[test]
+    fn rejects_invalid_key_definitions() {
+        let error = parse_statement(
+            "CREATE TABLE users (id INT PRIMARY KEY, code INT, PRIMARY KEY (code));",
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "only one PRIMARY KEY is allowed");
+
+        let error =
+            parse_statement("CREATE TABLE users (id INT, PRIMARY KEY (missing));").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "unknown column `missing` in key definition"
+        );
+
+        let error =
+            parse_statement("CREATE TABLE users (id INT, code INT, PRIMARY KEY (id, code));")
+                .unwrap_err();
+        assert_eq!(error.to_string(), "PRIMARY KEY supports exactly one column");
+    }
+
+    #[test]
+    fn primary_key_and_unique_key_reject_duplicate_inserts() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT PRIMARY KEY, email TEXT UNIQUE KEY, name TEXT);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, email, name) VALUES (1, 'a@example.com', 'Alice');",
+        );
+
+        let error = database
+            .execute(
+                parse_statement(
+                    "INSERT INTO users (id, email, name) VALUES (1, 'b@example.com', 'Bob');",
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "duplicate value `1` for key `id`");
+
+        let error = database
+            .execute(
+                parse_statement(
+                    "INSERT INTO users (id, email, name) VALUES (2, 'a@example.com', 'Bob');",
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "duplicate value `a@example.com` for key `email`"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn primary_key_and_unique_key_reject_invalid_updates() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT PRIMARY KEY, email TEXT UNIQUE KEY, name TEXT);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, email, name) VALUES (1, 'a@example.com', 'Alice'), (2, 'b@example.com', 'Bob');",
+        );
+
+        let error = database
+            .execute(parse_statement("UPDATE users SET id = 1 WHERE id = 2;").unwrap())
+            .unwrap_err();
+        assert_eq!(error.to_string(), "duplicate value `1` for key `id`");
+
+        let error = database
+            .execute(
+                parse_statement("UPDATE users SET email = 'a@example.com' WHERE id = 2;").unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "duplicate value `a@example.com` for key `email`"
+        );
+
+        let error = database
+            .execute(parse_statement("UPDATE users SET id = NULL WHERE id = 2;").unwrap())
+            .unwrap_err();
+        assert_eq!(error.to_string(), "column `id` cannot be NULL");
+
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM users ORDER BY id;"),
+            "id\temail\tname\n1\ta@example.com\tAlice\n2\tb@example.com\tBob"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

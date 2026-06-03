@@ -193,6 +193,42 @@ CREATE TABLE users (
 );
 ```
 
+### PRIMARY KEY / UNIQUE KEY
+
+`PRIMARY KEY` はテーブル内の行を一意に識別するためのキーで、重複値を許可しない。`PRIMARY KEY` に指定したカラムは `NOT NULL` として扱われる。
+
+`UNIQUE KEY` は、指定したカラムの値がテーブル内で重複しないことを保証するキーである。MySQL では `UNIQUE`、`UNIQUE KEY`、`UNIQUE INDEX` は同義として扱われる。
+
+```sql
+CREATE TABLE users (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    email VARCHAR(255) UNIQUE KEY,
+    name VARCHAR(100) NOT NULL
+);
+```
+
+テーブル制約として指定することもできる。
+
+```sql
+CREATE TABLE users (
+    id BIGINT AUTO_INCREMENT,
+    email VARCHAR(255),
+    name VARCHAR(100) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY unique_users_email (email)
+);
+```
+
+このプロジェクトでは、次の範囲をサポートする。
+
+- 単一カラムの `PRIMARY KEY`。
+- 単一カラムの `UNIQUE` または `UNIQUE KEY`。
+- カラム定義内の指定と、`PRIMARY KEY (column)` / `UNIQUE KEY name (column)` 形式のテーブル制約。
+- `INSERT` と `UPDATE` における重複値のエラー。
+- `PRIMARY KEY` カラムへの `NULL` 登録のエラー。
+
+複合キー、キー名の保存、`UNIQUE INDEX`、インデックス構造の作成には未対応。
+
 ### AUTO_INCREMENT
 
 MySQL では `AUTO_INCREMENT` 属性を使用すると、新しい行を追加する際に連番を自動生成できる。属性名は `AUTOINCREMENT` ではなく、アンダースコアを含む `AUTO_INCREMENT` と記述する。

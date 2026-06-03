@@ -1,4 +1,7 @@
-use crate::data_type::{validate_auto_increment_columns, validate_data_type};
+use crate::data_type::{
+    has_primary_key, has_unique_key, validate_auto_increment_columns, validate_data_type,
+    validate_key_columns,
+};
 use crate::error::{Result, SqlRockError};
 use crate::model::{AlterTableAction, Column, SQL_NULL, SetClause, Statement, WhereClause};
 use crate::query_parser::parse_select_query;
@@ -74,7 +77,13 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
     validate_identifier(table_name)?;
 
     let mut columns = Vec::new();
+    let mut key_constraints = Vec::new();
     for item in split_comma_separated(definition) {
+        if let Some(key_constraint) = parse_table_key_constraint(&item)? {
+            key_constraints.push(key_constraint);
+            continue;
+        }
+
         let mut parts = item.split_whitespace();
         let Some(name) = parts.next() else {
             return Err(SqlRockError::new("empty column definition"));
@@ -94,6 +103,7 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
             data_type,
         });
     }
+    apply_table_key_constraints(&mut columns, key_constraints)?;
 
     if columns.is_empty() {
         return Err(SqlRockError::new(
@@ -101,11 +111,105 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
         ));
     }
     validate_auto_increment_columns(&columns)?;
+    validate_key_columns(&columns)?;
 
     Ok(Statement::CreateTable {
         name: table_name.to_string(),
         columns,
     })
+}
+
+enum TableKeyConstraint {
+    PrimaryKey(String),
+    UniqueKey(String),
+}
+
+fn parse_table_key_constraint(item: &str) -> Result<Option<TableKeyConstraint>> {
+    let item = item.trim();
+    if starts_with_keyword(item, "primary key") {
+        let rest = strip_keyword(item, "primary key")?.trim_start();
+        let column = parse_single_key_column(rest, "PRIMARY KEY")?;
+        return Ok(Some(TableKeyConstraint::PrimaryKey(column)));
+    }
+
+    if starts_with_keyword(item, "unique key") {
+        let rest = strip_keyword(item, "unique key")?.trim_start();
+        let column = parse_optional_named_key_column(rest, "UNIQUE KEY")?;
+        return Ok(Some(TableKeyConstraint::UniqueKey(column)));
+    }
+
+    if starts_with_keyword(item, "unique") {
+        let rest = strip_keyword(item, "unique")?.trim_start();
+        let rest = if starts_with_keyword(rest, "key") {
+            strip_keyword(rest, "key")?.trim_start()
+        } else {
+            rest
+        };
+        let column = parse_optional_named_key_column(rest, "UNIQUE")?;
+        return Ok(Some(TableKeyConstraint::UniqueKey(column)));
+    }
+
+    Ok(None)
+}
+
+fn parse_optional_named_key_column<'a>(rest: &'a str, constraint_name: &str) -> Result<String> {
+    if rest.trim_start().starts_with('(') {
+        return parse_single_key_column(rest, constraint_name);
+    }
+
+    let (_key_name, rest) = split_leading_identifier(rest)?;
+    parse_single_key_column(rest.trim_start(), constraint_name)
+}
+
+fn parse_single_key_column(rest: &str, constraint_name: &str) -> Result<String> {
+    let (columns_sql, trailing) = take_parenthesized(rest)?;
+    if !trailing.trim().is_empty() {
+        return Err(SqlRockError::new(format!(
+            "unexpected trailing SQL in {constraint_name}"
+        )));
+    }
+
+    let columns = split_comma_separated(columns_sql);
+    if columns.len() != 1 {
+        return Err(SqlRockError::new(format!(
+            "{constraint_name} supports exactly one column"
+        )));
+    }
+
+    let column = columns[0].trim();
+    validate_identifier(column)?;
+    Ok(column.to_string())
+}
+
+fn apply_table_key_constraints(
+    columns: &mut [Column],
+    key_constraints: Vec<TableKeyConstraint>,
+) -> Result<()> {
+    for key_constraint in key_constraints {
+        let (column_name, attribute) = match key_constraint {
+            TableKeyConstraint::PrimaryKey(column_name) => (column_name, "PRIMARY KEY"),
+            TableKeyConstraint::UniqueKey(column_name) => (column_name, "UNIQUE KEY"),
+        };
+        let Some(column) = columns
+            .iter_mut()
+            .find(|column| column.name.eq_ignore_ascii_case(&column_name))
+        else {
+            return Err(SqlRockError::new(format!(
+                "unknown column `{column_name}` in key definition"
+            )));
+        };
+
+        let already_has_attribute = match attribute {
+            "PRIMARY KEY" => has_primary_key(&column.data_type),
+            "UNIQUE KEY" => has_unique_key(&column.data_type),
+            _ => false,
+        };
+        if !already_has_attribute {
+            column.data_type = format!("{} {attribute}", column.data_type);
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_insert_into(sql: &str) -> Result<Statement> {
