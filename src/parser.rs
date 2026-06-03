@@ -1,6 +1,11 @@
-use crate::data_type::{validate_auto_increment_columns, validate_data_type};
+use crate::data_type::{
+    has_primary_key, has_unique_key, validate_auto_increment_columns, validate_data_type,
+    validate_key_columns,
+};
 use crate::error::{Result, SqlRockError};
-use crate::model::{AlterTableAction, Column, SQL_NULL, SetClause, Statement, WhereClause};
+use crate::model::{
+    AlterTableAction, Column, SQL_NULL, SetClause, Statement, TableOption, WhereClause,
+};
 use crate::query_parser::parse_select_query;
 
 pub fn parse_statement(sql: &str) -> Result<Statement> {
@@ -70,11 +75,18 @@ pub fn split_statements(sql: &str) -> Vec<String> {
 
 fn parse_create_table(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "create table")?.trim();
-    let (table_name, definition) = split_name_and_parenthesized(rest)?;
+    let (table_name, definition, trailing) = split_name_and_parenthesized_with_trailing(rest)?;
     validate_identifier(table_name)?;
+    let table_options = parse_table_options(trailing.trim())?;
 
     let mut columns = Vec::new();
+    let mut key_constraints = Vec::new();
     for item in split_comma_separated(definition) {
+        if let Some(key_constraint) = parse_table_key_constraint(&item)? {
+            key_constraints.push(key_constraint);
+            continue;
+        }
+
         let mut parts = item.split_whitespace();
         let Some(name) = parts.next() else {
             return Err(SqlRockError::new("empty column definition"));
@@ -94,6 +106,7 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
             data_type,
         });
     }
+    apply_table_key_constraints(&mut columns, key_constraints)?;
 
     if columns.is_empty() {
         return Err(SqlRockError::new(
@@ -101,11 +114,233 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
         ));
     }
     validate_auto_increment_columns(&columns)?;
+    validate_key_columns(&columns)?;
 
     Ok(Statement::CreateTable {
         name: table_name.to_string(),
         columns,
+        comment: table_options.comment,
+        options: table_options.options,
+        auto_increment_start: table_options.auto_increment_start,
     })
+}
+
+#[derive(Default)]
+struct TableOptions {
+    comment: Option<String>,
+    options: Vec<TableOption>,
+    auto_increment_start: Option<u64>,
+}
+
+fn parse_table_options(mut trailing: &str) -> Result<TableOptions> {
+    let mut options = TableOptions::default();
+    trailing = trailing.trim();
+    while !trailing.is_empty() {
+        if starts_with_keyword(trailing, "comment") {
+            let (comment, rest) = parse_table_comment_option(trailing)?;
+            options.comment = Some(comment);
+            trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "auto_increment") {
+            let (value, rest) = parse_auto_increment_option(trailing)?;
+            options.auto_increment_start = Some(value);
+            trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "character set") {
+            let (value, rest) = parse_table_value_option(trailing, "character set")?;
+            options.options.push(TableOption {
+                name: "CHARACTER SET".to_string(),
+                value,
+            });
+            trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "collate") {
+            let (value, rest) = parse_table_value_option(trailing, "collate")?;
+            options.options.push(TableOption {
+                name: "COLLATE".to_string(),
+                value,
+            });
+            trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "engine") {
+            let (value, rest) = parse_table_value_option(trailing, "engine")?;
+            options.options.push(TableOption {
+                name: "ENGINE".to_string(),
+                value,
+            });
+            trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "checksum") {
+            let (value, rest) = parse_table_value_option(trailing, "checksum")?;
+            options.options.push(TableOption {
+                name: "CHECKSUM".to_string(),
+                value,
+            });
+            trailing = rest.trim_start();
+        } else {
+            return Err(SqlRockError::new(format!(
+                "unexpected trailing SQL: {trailing}"
+            )));
+        }
+    }
+
+    Ok(options)
+}
+
+fn parse_table_comment_option(input: &str) -> Result<(String, &str)> {
+    let rest = strip_keyword(input, "comment")?.trim_start();
+    let rest = strip_keyword(rest, "=")?.trim_start();
+    if !rest.starts_with('\'') {
+        return Err(SqlRockError::new("table COMMENT requires a quoted string"));
+    }
+
+    let mut chars = rest.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if ch == '\'' {
+            if index == 0 {
+                continue;
+            }
+            if chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                chars.next();
+                continue;
+            }
+
+            return Ok((rest[1..index].replace("''", "'"), &rest[index + 1..]));
+        }
+    }
+
+    Err(SqlRockError::new("unterminated table COMMENT"))
+}
+
+fn parse_auto_increment_option(input: &str) -> Result<(u64, &str)> {
+    let rest = strip_keyword(input, "auto_increment")?.trim_start();
+    let rest = strip_keyword(rest, "=")?.trim_start();
+    let value_end = rest
+        .char_indices()
+        .find(|(_, ch)| !ch.is_ascii_digit())
+        .map(|(index, _)| index)
+        .unwrap_or(rest.len());
+    if value_end == 0 {
+        return Err(SqlRockError::new(
+            "table AUTO_INCREMENT requires a positive integer",
+        ));
+    }
+
+    let value = rest[..value_end]
+        .parse()
+        .map_err(|_| SqlRockError::new("invalid table AUTO_INCREMENT value"))?;
+    if value == 0 {
+        return Err(SqlRockError::new(
+            "table AUTO_INCREMENT requires a positive integer",
+        ));
+    }
+    Ok((value, &rest[value_end..]))
+}
+
+fn parse_table_value_option<'a>(input: &'a str, keyword: &str) -> Result<(String, &'a str)> {
+    let rest = strip_keyword(input, keyword)?.trim_start();
+    let rest = strip_keyword(rest, "=")?.trim_start();
+    let value_end = rest
+        .char_indices()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(index, _)| index)
+        .unwrap_or(rest.len());
+    if value_end == 0 {
+        return Err(SqlRockError::new(format!(
+            "table {} requires a value",
+            keyword.to_ascii_uppercase()
+        )));
+    }
+
+    Ok((rest[..value_end].to_string(), &rest[value_end..]))
+}
+
+enum TableKeyConstraint {
+    PrimaryKey(String),
+    UniqueKey(String),
+}
+
+fn parse_table_key_constraint(item: &str) -> Result<Option<TableKeyConstraint>> {
+    let item = item.trim();
+    if starts_with_keyword(item, "primary key") {
+        let rest = strip_keyword(item, "primary key")?.trim_start();
+        let column = parse_single_key_column(rest, "PRIMARY KEY")?;
+        return Ok(Some(TableKeyConstraint::PrimaryKey(column)));
+    }
+
+    if starts_with_keyword(item, "unique key") {
+        let rest = strip_keyword(item, "unique key")?.trim_start();
+        let column = parse_optional_named_key_column(rest, "UNIQUE KEY")?;
+        return Ok(Some(TableKeyConstraint::UniqueKey(column)));
+    }
+
+    if starts_with_keyword(item, "unique") {
+        let rest = strip_keyword(item, "unique")?.trim_start();
+        let rest = if starts_with_keyword(rest, "key") {
+            strip_keyword(rest, "key")?.trim_start()
+        } else {
+            rest
+        };
+        let column = parse_optional_named_key_column(rest, "UNIQUE")?;
+        return Ok(Some(TableKeyConstraint::UniqueKey(column)));
+    }
+
+    Ok(None)
+}
+
+fn parse_optional_named_key_column<'a>(rest: &'a str, constraint_name: &str) -> Result<String> {
+    if rest.trim_start().starts_with('(') {
+        return parse_single_key_column(rest, constraint_name);
+    }
+
+    let (_key_name, rest) = split_leading_identifier(rest)?;
+    parse_single_key_column(rest.trim_start(), constraint_name)
+}
+
+fn parse_single_key_column(rest: &str, constraint_name: &str) -> Result<String> {
+    let (columns_sql, trailing) = take_parenthesized(rest)?;
+    if !trailing.trim().is_empty() {
+        return Err(SqlRockError::new(format!(
+            "unexpected trailing SQL in {constraint_name}"
+        )));
+    }
+
+    let columns = split_comma_separated(columns_sql);
+    if columns.len() != 1 {
+        return Err(SqlRockError::new(format!(
+            "{constraint_name} supports exactly one column"
+        )));
+    }
+
+    let column = columns[0].trim();
+    validate_identifier(column)?;
+    Ok(column.to_string())
+}
+
+fn apply_table_key_constraints(
+    columns: &mut [Column],
+    key_constraints: Vec<TableKeyConstraint>,
+) -> Result<()> {
+    for key_constraint in key_constraints {
+        let (column_name, attribute) = match key_constraint {
+            TableKeyConstraint::PrimaryKey(column_name) => (column_name, "PRIMARY KEY"),
+            TableKeyConstraint::UniqueKey(column_name) => (column_name, "UNIQUE KEY"),
+        };
+        let Some(column) = columns
+            .iter_mut()
+            .find(|column| column.name.eq_ignore_ascii_case(&column_name))
+        else {
+            return Err(SqlRockError::new(format!(
+                "unknown column `{column_name}` in key definition"
+            )));
+        };
+
+        let already_has_attribute = match attribute {
+            "PRIMARY KEY" => has_primary_key(&column.data_type),
+            "UNIQUE KEY" => has_unique_key(&column.data_type),
+            _ => false,
+        };
+        if !already_has_attribute {
+            column.data_type = format!("{} {attribute}", column.data_type);
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_insert_into(sql: &str) -> Result<Statement> {
@@ -485,17 +720,11 @@ fn parse_value(value: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-fn split_name_and_parenthesized(input: &str) -> Result<(&str, &str)> {
+fn split_name_and_parenthesized_with_trailing(input: &str) -> Result<(&str, &str, &str)> {
     let (name, rest) = split_leading_identifier(input)?;
     let rest = rest.trim_start();
     let (inside, trailing) = take_parenthesized(rest)?;
-    if !trailing.trim().is_empty() {
-        return Err(SqlRockError::new(format!(
-            "unexpected trailing SQL: {}",
-            trailing.trim()
-        )));
-    }
-    Ok((name, inside))
+    Ok((name, inside, trailing))
 }
 
 fn split_leading_identifier(input: &str) -> Result<(&str, &str)> {

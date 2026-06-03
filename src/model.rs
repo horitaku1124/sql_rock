@@ -7,9 +7,17 @@ pub struct Column {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableOption {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
     pub name: String,
     pub columns: Vec<Column>,
+    pub comment: Option<String>,
+    pub options: Vec<TableOption>,
     pub auto_increment_next: Option<u64>,
     pub rows: Vec<Vec<String>>,
 }
@@ -129,6 +137,9 @@ pub enum Statement {
     CreateTable {
         name: String,
         columns: Vec<Column>,
+        comment: Option<String>,
+        options: Vec<TableOption>,
+        auto_increment_start: Option<u64>,
     },
     InsertInto {
         table: String,

@@ -11,7 +11,7 @@ pub mod storage;
 #[cfg(test)]
 mod tests {
     use crate::database::Database;
-    use crate::model::{Column, SetClause, Statement, WhereClause};
+    use crate::model::{Column, SetClause, Statement, TableOption, WhereClause};
     use crate::parser::{parse_statement, split_statements};
     use crate::storage::parse_table_file;
     use std::env;
@@ -63,6 +63,9 @@ mod tests {
             statement,
             Statement::CreateTable {
                 name: "users".to_string(),
+                comment: None,
+                options: Vec::new(),
+                auto_increment_start: None,
                 columns: vec![
                     Column {
                         name: "id".to_string(),
@@ -73,6 +76,128 @@ mod tests {
                         data_type: "VARCHAR(255)".to_string(),
                     },
                 ],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_create_table_with_primary_key_and_unique_key() {
+        let statement = parse_statement(
+            "CREATE TABLE users (id INT, email TEXT, PRIMARY KEY (id), UNIQUE KEY unique_email (email));",
+        )
+        .unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users".to_string(),
+                comment: None,
+                options: Vec::new(),
+                auto_increment_start: None,
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT PRIMARY KEY".to_string(),
+                    },
+                    Column {
+                        name: "email".to_string(),
+                        data_type: "TEXT UNIQUE KEY".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_create_table_with_table_comment() {
+        let statement =
+            parse_statement("CREATE TABLE users (id INT, name TEXT) COMMENT='ユーザー情報''管理';")
+                .unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users".to_string(),
+                comment: Some("ユーザー情報'管理".to_string()),
+                options: Vec::new(),
+                auto_increment_start: None,
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT".to_string(),
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "TEXT".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_create_table_with_auto_increment_start() {
+        let statement = parse_statement(
+            "CREATE TABLE users (id INT AUTO_INCREMENT, name TEXT) AUTO_INCREMENT=100 COMMENT='users';",
+        )
+        .unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users".to_string(),
+                comment: Some("users".to_string()),
+                options: Vec::new(),
+                auto_increment_start: Some(100),
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT AUTO_INCREMENT".to_string(),
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "TEXT".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_create_table_with_passive_table_options() {
+        let statement = parse_statement(
+            "CREATE TABLE users (id INT) CHARACTER SET=utf8mb4 COLLATE=utf8mb4_bin ENGINE=InnoDB CHECKSUM=0;",
+        )
+        .unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users".to_string(),
+                comment: None,
+                options: vec![
+                    TableOption {
+                        name: "CHARACTER SET".to_string(),
+                        value: "utf8mb4".to_string(),
+                    },
+                    TableOption {
+                        name: "COLLATE".to_string(),
+                        value: "utf8mb4_bin".to_string(),
+                    },
+                    TableOption {
+                        name: "ENGINE".to_string(),
+                        value: "InnoDB".to_string(),
+                    },
+                    TableOption {
+                        name: "CHECKSUM".to_string(),
+                        value: "0".to_string(),
+                    },
+                ],
+                auto_increment_start: None,
+                columns: vec![Column {
+                    name: "id".to_string(),
+                    data_type: "INT".to_string(),
+                }],
             }
         );
     }
@@ -184,6 +309,34 @@ mod tests {
     }
 
     #[test]
+    fn auto_increment_uses_create_table_start_value() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT AUTO_INCREMENT, name TEXT) AUTO_INCREMENT=100;",
+        );
+
+        execute_sql(&database, "INSERT INTO users (name) VALUES ('Taro');");
+        execute_sql(&database, "INSERT INTO users (name) VALUES ('Jiro');");
+
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM users;"),
+            "id\tname\n100\tTaro\n101\tJiro"
+        );
+        assert!(
+            fs::read_to_string(root.join("users.table"))
+                .unwrap()
+                .contains("auto_increment:102\n")
+        );
+        assert_eq!(
+            execute_sql(&database, "SHOW CREATE TABLE users;"),
+            "Table\tCreate Table\nusers\tCREATE TABLE users (id INT AUTO_INCREMENT, name TEXT) AUTO_INCREMENT=102"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn auto_increment_advances_after_update_and_resets_after_truncate() {
         let root = test_dir();
         let database = Database::new(&root);
@@ -221,6 +374,105 @@ mod tests {
             error.to_string(),
             "only one AUTO_INCREMENT column is allowed"
         );
+    }
+
+    #[test]
+    fn rejects_invalid_key_definitions() {
+        let error = parse_statement(
+            "CREATE TABLE users (id INT PRIMARY KEY, code INT, PRIMARY KEY (code));",
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "only one PRIMARY KEY is allowed");
+
+        let error =
+            parse_statement("CREATE TABLE users (id INT, PRIMARY KEY (missing));").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "unknown column `missing` in key definition"
+        );
+
+        let error =
+            parse_statement("CREATE TABLE users (id INT, code INT, PRIMARY KEY (id, code));")
+                .unwrap_err();
+        assert_eq!(error.to_string(), "PRIMARY KEY supports exactly one column");
+    }
+
+    #[test]
+    fn primary_key_and_unique_key_reject_duplicate_inserts() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT PRIMARY KEY, email TEXT UNIQUE KEY, name TEXT);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, email, name) VALUES (1, 'a@example.com', 'Alice');",
+        );
+
+        let error = database
+            .execute(
+                parse_statement(
+                    "INSERT INTO users (id, email, name) VALUES (1, 'b@example.com', 'Bob');",
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "duplicate value `1` for key `id`");
+
+        let error = database
+            .execute(
+                parse_statement(
+                    "INSERT INTO users (id, email, name) VALUES (2, 'a@example.com', 'Bob');",
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "duplicate value `a@example.com` for key `email`"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn primary_key_and_unique_key_reject_invalid_updates() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT PRIMARY KEY, email TEXT UNIQUE KEY, name TEXT);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, email, name) VALUES (1, 'a@example.com', 'Alice'), (2, 'b@example.com', 'Bob');",
+        );
+
+        let error = database
+            .execute(parse_statement("UPDATE users SET id = 1 WHERE id = 2;").unwrap())
+            .unwrap_err();
+        assert_eq!(error.to_string(), "duplicate value `1` for key `id`");
+
+        let error = database
+            .execute(
+                parse_statement("UPDATE users SET email = 'a@example.com' WHERE id = 2;").unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "duplicate value `a@example.com` for key `email`"
+        );
+
+        let error = database
+            .execute(parse_statement("UPDATE users SET id = NULL WHERE id = 2;").unwrap())
+            .unwrap_err();
+        assert_eq!(error.to_string(), "column `id` cannot be NULL");
+
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM users ORDER BY id;"),
+            "id\temail\tname\n1\ta@example.com\tAlice\n2\tb@example.com\tBob"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -455,8 +707,104 @@ mod tests {
         let table =
             parse_table_file("table:users\ncolumns:id:INT|name:TEXT\nrows:\n1|Alice\n").unwrap();
 
+        assert_eq!(table.comment, None);
+        assert_eq!(table.options, Vec::new());
         assert_eq!(table.auto_increment_next, None);
         assert_eq!(table.rows, vec![vec!["1".to_string(), "Alice".to_string()]]);
+    }
+
+    #[test]
+    fn stores_and_reads_table_comment() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT, name TEXT) COMMENT='user''s table';",
+        );
+
+        let table =
+            parse_table_file(&fs::read_to_string(root.join("users.table")).unwrap()).unwrap();
+
+        assert_eq!(table.comment, Some("user's table".to_string()));
+        assert!(
+            fs::read_to_string(root.join("users.table"))
+                .unwrap()
+                .contains("comment:user's table\n")
+        );
+        assert_eq!(
+            execute_sql(&database, "SHOW CREATE TABLE users;"),
+            "Table\tCreate Table\nusers\tCREATE TABLE users (id INT, name TEXT) COMMENT='user''s table'"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stores_and_shows_passive_table_options() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT, name TEXT) CHARACTER SET=utf8mb4 COLLATE=utf8mb4_bin ENGINE=InnoDB CHECKSUM=0;",
+        );
+
+        let table =
+            parse_table_file(&fs::read_to_string(root.join("users.table")).unwrap()).unwrap();
+
+        assert_eq!(
+            table.options,
+            vec![
+                TableOption {
+                    name: "CHARACTER SET".to_string(),
+                    value: "utf8mb4".to_string(),
+                },
+                TableOption {
+                    name: "COLLATE".to_string(),
+                    value: "utf8mb4_bin".to_string(),
+                },
+                TableOption {
+                    name: "ENGINE".to_string(),
+                    value: "InnoDB".to_string(),
+                },
+                TableOption {
+                    name: "CHECKSUM".to_string(),
+                    value: "0".to_string(),
+                },
+            ]
+        );
+        assert!(
+            fs::read_to_string(root.join("users.table"))
+                .unwrap()
+                .contains(
+                    "options:CHARACTER SET:utf8mb4|COLLATE:utf8mb4_bin|ENGINE:InnoDB|CHECKSUM:0\n"
+                )
+        );
+        assert_eq!(
+            execute_sql(&database, "SHOW CREATE TABLE users;"),
+            "Table\tCreate Table\nusers\tCREATE TABLE users (id INT, name TEXT) CHARACTER SET=utf8mb4 COLLATE=utf8mb4_bin ENGINE=InnoDB CHECKSUM=0"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_table_supports_comment_and_auto_increment_options_in_any_order() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT AUTO_INCREMENT, name TEXT) COMMENT='users' AUTO_INCREMENT=50;",
+        );
+
+        execute_sql(&database, "INSERT INTO users (name) VALUES ('Taro');");
+
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM users;"),
+            "id\tname\n50\tTaro"
+        );
+        assert_eq!(
+            execute_sql(&database, "SHOW CREATE TABLE users;"),
+            "Table\tCreate Table\nusers\tCREATE TABLE users (id INT AUTO_INCREMENT, name TEXT) COMMENT='users' AUTO_INCREMENT=51"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

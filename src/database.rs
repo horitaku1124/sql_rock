@@ -1,4 +1,7 @@
-use crate::data_type::{has_auto_increment, has_not_null, validate_auto_increment_columns};
+use crate::data_type::{
+    has_auto_increment, has_not_null, has_primary_key, has_unique_key,
+    validate_auto_increment_columns, validate_key_columns,
+};
 use crate::error::{Result, SqlRockError};
 use crate::model::{AlterTableAction, Column, SQL_NULL, SetClause, Statement, Table, WhereClause};
 use crate::query_engine::execute_query;
@@ -17,7 +20,13 @@ impl Database {
 
     pub fn execute(&self, statement: Statement) -> Result<String> {
         match statement {
-            Statement::CreateTable { name, columns } => self.create_table(&name, columns),
+            Statement::CreateTable {
+                name,
+                columns,
+                comment,
+                options,
+                auto_increment_start,
+            } => self.create_table(&name, columns, comment, options, auto_increment_start),
             Statement::InsertInto {
                 table,
                 columns,
@@ -65,9 +74,17 @@ impl Database {
         }
     }
 
-    fn create_table(&self, name: &str, columns: Vec<Column>) -> Result<String> {
+    fn create_table(
+        &self,
+        name: &str,
+        columns: Vec<Column>,
+        comment: Option<String>,
+        options: Vec<crate::model::TableOption>,
+        auto_increment_start: Option<u64>,
+    ) -> Result<String> {
         fs::create_dir_all(&self.root)?;
         validate_auto_increment_columns(&columns)?;
+        validate_key_columns(&columns)?;
 
         let path = self.table_path(name)?;
         if path.exists() {
@@ -77,7 +94,9 @@ impl Database {
         let mut table = Table {
             name: name.to_string(),
             columns,
-            auto_increment_next: None,
+            comment,
+            options,
+            auto_increment_next: auto_increment_start,
             rows: Vec::new(),
         };
         sync_auto_increment_next(&mut table)?;
@@ -113,6 +132,7 @@ impl Database {
 
         apply_auto_increment(&mut table, &mut row)?;
         validate_not_null_values(&table, &row, &provided)?;
+        validate_key_values(&table, &row, None)?;
         normalize_null_values(&mut row);
         table.rows.push(row);
         fs::write(path, serialize_table(&table))?;
@@ -219,8 +239,22 @@ impl Database {
             .map(|column| format!("{} {}", column.name, column.data_type))
             .collect::<Vec<_>>()
             .join(", ");
+        let comment = table
+            .comment
+            .as_deref()
+            .map(|comment| format!(" COMMENT='{}'", comment.replace('\'', "''")))
+            .unwrap_or_default();
+        let auto_increment = table
+            .auto_increment_next
+            .map(|value| format!(" AUTO_INCREMENT={value}"))
+            .unwrap_or_default();
+        let options = table
+            .options
+            .iter()
+            .map(|option| format!(" {}={}", option.name, option.value))
+            .collect::<String>();
         Ok(format!(
-            "Table\tCreate Table\n{table_name}\tCREATE TABLE {table_name} ({columns})"
+            "Table\tCreate Table\n{table_name}\tCREATE TABLE {table_name} ({columns}){comment}{auto_increment}{options}"
         ))
     }
 
@@ -248,6 +282,7 @@ impl Database {
             }
         }
         validate_auto_increment_columns(&table.columns)?;
+        validate_key_columns(&table.columns)?;
         sync_auto_increment_next(&mut table)?;
         fs::write(path, serialize_table(&table))?;
         Ok(format!("altered table `{table_name}`"))
@@ -336,8 +371,9 @@ impl Database {
         let set_index = column_index(&table, &set_clause.column, table_name)?;
         let where_index = column_index(&table, &where_clause.column, table_name)?;
 
+        let mut rows = table.rows.clone();
         let mut updated_count = 0;
-        for row in &mut table.rows {
+        for row in &mut rows {
             if row.get(where_index) == Some(&where_clause.value) {
                 let value = normalize_updated_value(&table.columns[set_index], &set_clause.value)?;
                 row[set_index] = value;
@@ -345,6 +381,8 @@ impl Database {
             }
         }
 
+        validate_all_key_values(&table, &rows)?;
+        table.rows = rows;
         sync_auto_increment_next(&mut table)?;
         fs::write(path, serialize_table(&table))?;
         Ok(format!("updated {updated_count} row(s) in `{table_name}`"))
@@ -369,8 +407,9 @@ impl Database {
             })
             .collect::<Result<Vec<_>>>()?;
         let where_index = column_index(&table, &where_clause.column, table_name)?;
+        let mut rows = table.rows.clone();
         let mut updated_count = 0;
-        for row in &mut table.rows {
+        for row in &mut rows {
             if row.get(where_index) == Some(&where_clause.value) {
                 for (index, value) in &updates {
                     row[*index] = value.clone();
@@ -378,6 +417,8 @@ impl Database {
                 updated_count += 1;
             }
         }
+        validate_all_key_values(&table, &rows)?;
+        table.rows = rows;
         sync_auto_increment_next(&mut table)?;
         fs::write(path, serialize_table(&table))?;
         Ok(format!("updated {updated_count} row(s) in `{table_name}`"))
@@ -434,6 +475,48 @@ fn validate_not_null_values(table: &Table, row: &[String], provided: &[bool]) ->
             )));
         }
     }
+    Ok(())
+}
+
+fn validate_all_key_values(table: &Table, rows: &[Vec<String>]) -> Result<()> {
+    for (row_index, row) in rows.iter().enumerate() {
+        validate_key_values_in_rows(table, row, rows, Some(row_index))?;
+    }
+    Ok(())
+}
+
+fn validate_key_values(table: &Table, row: &[String], skip_row: Option<usize>) -> Result<()> {
+    validate_key_values_in_rows(table, row, &table.rows, skip_row)
+}
+
+fn validate_key_values_in_rows(
+    table: &Table,
+    row: &[String],
+    rows: &[Vec<String>],
+    skip_row: Option<usize>,
+) -> Result<()> {
+    for (index, column) in table.columns.iter().enumerate() {
+        if !(has_primary_key(&column.data_type) || has_unique_key(&column.data_type)) {
+            continue;
+        }
+
+        let Some(value) = row.get(index) else {
+            continue;
+        };
+        if has_unique_key(&column.data_type) && value == SQL_NULL {
+            continue;
+        }
+
+        if rows.iter().enumerate().any(|(row_index, existing)| {
+            Some(row_index) != skip_row && existing.get(index) == Some(value)
+        }) {
+            return Err(SqlRockError::new(format!(
+                "duplicate value `{value}` for key `{}`",
+                column.name
+            )));
+        }
+    }
+
     Ok(())
 }
 

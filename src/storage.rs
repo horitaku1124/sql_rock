@@ -1,5 +1,5 @@
 use crate::error::{Result, SqlRockError};
-use crate::model::{Column, Table};
+use crate::model::{Column, Table, TableOption};
 
 pub fn serialize_table(table: &Table) -> String {
     let mut lines = Vec::new();
@@ -13,6 +13,27 @@ pub fn serialize_table(table: &Table) -> String {
                 "{}:{}",
                 escape_field(&column.name),
                 escape_field(&column.data_type)
+            ))
+            .collect::<Vec<_>>()
+            .join("|")
+    ));
+    lines.push(format!(
+        "comment:{}",
+        table
+            .comment
+            .as_deref()
+            .map(escape_field)
+            .unwrap_or_default()
+    ));
+    lines.push(format!(
+        "options:{}",
+        table
+            .options
+            .iter()
+            .map(|option| format!(
+                "{}:{}",
+                escape_field(&option.name),
+                escape_field(&option.value)
             ))
             .collect::<Vec<_>>()
             .join("|")
@@ -53,6 +74,37 @@ pub fn parse_table_file(content: &str) -> Result<Table> {
     let columns = columns_line
         .strip_prefix("columns:")
         .ok_or_else(|| SqlRockError::new("invalid columns line"))?;
+    let mut comment = None;
+    let mut options = Vec::new();
+    let mut metadata_or_rows_marker = metadata_or_rows_marker;
+    if let Some(value) = metadata_or_rows_marker.strip_prefix("comment:") {
+        if !value.is_empty() {
+            comment = Some(unescape_field(value)?);
+        }
+        metadata_or_rows_marker = lines
+            .next()
+            .ok_or_else(|| SqlRockError::new("table file is missing rows marker"))?;
+    }
+    if let Some(value) = metadata_or_rows_marker.strip_prefix("options:") {
+        if !value.is_empty() {
+            options = value
+                .split('|')
+                .map(|item| {
+                    let Some((name, value)) = item.split_once(':') else {
+                        return Err(SqlRockError::new("invalid table option metadata"));
+                    };
+                    Ok(TableOption {
+                        name: unescape_field(name)?,
+                        value: unescape_field(value)?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+        }
+        metadata_or_rows_marker = lines
+            .next()
+            .ok_or_else(|| SqlRockError::new("table file is missing rows marker"))?;
+    }
+
     let (auto_increment_next, rows_marker) =
         if let Some(value) = metadata_or_rows_marker.strip_prefix("auto_increment:") {
             let next = if value.is_empty() {
@@ -111,6 +163,8 @@ pub fn parse_table_file(content: &str) -> Result<Table> {
     Ok(Table {
         name: unescape_field(name)?,
         columns,
+        comment,
+        options,
         auto_increment_next,
         rows,
     })

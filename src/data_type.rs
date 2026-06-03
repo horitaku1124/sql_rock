@@ -83,6 +83,19 @@ pub fn validate_auto_increment_columns(columns: &[Column]) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_key_columns(columns: &[Column]) -> Result<()> {
+    let primary_key_count = columns
+        .iter()
+        .filter(|column| has_primary_key(&column.data_type))
+        .count();
+
+    if primary_key_count > 1 {
+        return Err(SqlRockError::new("only one PRIMARY KEY is allowed"));
+    }
+
+    Ok(())
+}
+
 pub fn has_auto_increment(data_type: &str) -> bool {
     data_type
         .split_whitespace()
@@ -90,10 +103,27 @@ pub fn has_auto_increment(data_type: &str) -> bool {
 }
 
 pub fn has_not_null(data_type: &str) -> bool {
+    if has_primary_key(data_type) {
+        return true;
+    }
+
     let parts = data_type.split_whitespace().collect::<Vec<_>>();
     parts.windows(2).any(|window| {
         window[0].eq_ignore_ascii_case("NOT") && window[1].eq_ignore_ascii_case("NULL")
     })
+}
+
+pub fn has_primary_key(data_type: &str) -> bool {
+    let parts = data_type.split_whitespace().collect::<Vec<_>>();
+    parts.windows(2).any(|window| {
+        window[0].eq_ignore_ascii_case("PRIMARY") && window[1].eq_ignore_ascii_case("KEY")
+    })
+}
+
+pub fn has_unique_key(data_type: &str) -> bool {
+    data_type
+        .split_whitespace()
+        .any(|part| part.eq_ignore_ascii_case("UNIQUE"))
 }
 
 fn data_type_name(data_type: &str) -> String {

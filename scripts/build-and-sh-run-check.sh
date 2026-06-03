@@ -14,5 +14,8 @@ bash "$BASEDIR/select-query-tests3.sh" "$CMD"
 bash "$BASEDIR/select-query-tests4.sh" "$CMD"
 bash "$BASEDIR/select-query-tests5.sh" "$CMD"
 bash "$BASEDIR/select-query-tests6.sh" "$CMD"
+bash "$BASEDIR/update-delete-tests.sh" "$CMD"
+bash "$BASEDIR/table-index-tests1.sh" "$CMD"
+bash "$BASEDIR/create-table-basic-tests1.sh" "$CMD"
 
 echo ok
