@@ -2,6 +2,7 @@ use crate::data_type::{
     has_primary_key, has_unique_key, validate_auto_increment_columns, validate_data_type,
     validate_key_columns,
 };
+use crate::datetime::{now_string, today_string};
 use crate::error::{Result, SqlRockError};
 use crate::model::{
     AlterTableAction, Column, SQL_NULL, SetClause, Statement, TableOption, WhereClause,
@@ -76,7 +77,7 @@ pub fn split_statements(sql: &str) -> Vec<String> {
 fn parse_create_table(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "create table")?.trim();
     let (table_name, definition, trailing) = split_name_and_parenthesized_with_trailing(rest)?;
-    validate_identifier(table_name)?;
+    validate_identifier(&table_name)?;
     let table_options = parse_table_options(trailing.trim())?;
 
     let mut columns = Vec::new();
@@ -87,13 +88,10 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
             continue;
         }
 
-        let mut parts = item.split_whitespace();
-        let Some(name) = parts.next() else {
-            return Err(SqlRockError::new("empty column definition"));
-        };
-        validate_identifier(name)?;
+        let (name, rest) = split_leading_identifier(&item)?;
+        validate_identifier(&name)?;
 
-        let data_type = parts.collect::<Vec<_>>().join(" ");
+        let data_type = rest.trim_start().to_string();
         if data_type.is_empty() {
             return Err(SqlRockError::new(format!(
                 "column `{name}` requires a data type"
@@ -101,10 +99,7 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
         }
         validate_data_type(&data_type)?;
 
-        columns.push(Column {
-            name: name.to_string(),
-            data_type,
-        });
+        columns.push(Column { name, data_type });
     }
     apply_table_key_constraints(&mut columns, key_constraints)?;
 
@@ -117,7 +112,7 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
     validate_key_columns(&columns)?;
 
     Ok(Statement::CreateTable {
-        name: table_name.to_string(),
+        name: table_name,
         columns,
         comment: table_options.comment,
         options: table_options.options,
@@ -148,6 +143,20 @@ fn parse_table_options(mut trailing: &str) -> Result<TableOptions> {
             let (value, rest) = parse_table_value_option(trailing, "character set")?;
             options.options.push(TableOption {
                 name: "CHARACTER SET".to_string(),
+                value,
+            });
+            trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "default charset") {
+            let (value, rest) = parse_table_value_option(trailing, "default charset")?;
+            options.options.push(TableOption {
+                name: "DEFAULT CHARSET".to_string(),
+                value,
+            });
+            trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "default character set") {
+            let (value, rest) = parse_table_value_option(trailing, "default character set")?;
+            options.options.push(TableOption {
+                name: "DEFAULT CHARACTER SET".to_string(),
                 value,
             });
             trailing = rest.trim_start();
@@ -307,9 +316,14 @@ fn parse_single_key_column(rest: &str, constraint_name: &str) -> Result<String> 
         )));
     }
 
-    let column = columns[0].trim();
-    validate_identifier(column)?;
-    Ok(column.to_string())
+    let (column, trailing) = split_leading_identifier(columns[0].trim())?;
+    validate_identifier(&column)?;
+    if !trailing.trim().is_empty() {
+        return Err(SqlRockError::new(format!(
+            "unexpected trailing SQL in {constraint_name}"
+        )));
+    }
+    Ok(column)
 }
 
 fn apply_table_key_constraints(
@@ -346,12 +360,12 @@ fn apply_table_key_constraints(
 fn parse_insert_into(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "insert into")?.trim();
     let (table_name, rest) = split_leading_identifier(rest)?;
-    validate_identifier(table_name)?;
+    validate_identifier(&table_name)?;
 
     let rest = rest.trim_start();
     if starts_with_keyword(rest, "select") {
         return Ok(Statement::InsertSelect {
-            table: table_name.to_string(),
+            table: table_name,
             query: Box::new(parse_select_query(rest)?),
         });
     }
@@ -366,6 +380,7 @@ fn parse_insert_into(sql: &str) -> Result<Statement> {
     let columns = split_comma_separated(columns_sql)
         .into_iter()
         .map(|column| {
+            let column = parse_identifier_only(&column)?;
             validate_identifier(&column)?;
             Ok(column)
         })
@@ -395,13 +410,13 @@ fn parse_insert_into(sql: &str) -> Result<Statement> {
     }
     if rows.len() == 1 {
         Ok(Statement::InsertInto {
-            table: table_name.to_string(),
+            table: table_name,
             columns,
             values: rows.remove(0),
         })
     } else {
         Ok(Statement::InsertRows {
-            table: table_name.to_string(),
+            table: table_name,
             columns,
             rows,
         })
@@ -457,7 +472,7 @@ fn parse_select_all(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "*")?.trim_start();
     let rest = strip_keyword(rest, "from")?.trim_start();
     let (table_name, trailing) = split_leading_identifier(rest)?;
-    validate_identifier(table_name)?;
+    validate_identifier(&table_name)?;
 
     let trailing = trailing.trim_start();
     let where_clause = if trailing.is_empty() {
@@ -467,7 +482,7 @@ fn parse_select_all(sql: &str) -> Result<Statement> {
     };
 
     Ok(Statement::SelectAll {
-        table: table_name.to_string(),
+        table: table_name,
         where_clause,
     })
 }
@@ -475,12 +490,12 @@ fn parse_select_all(sql: &str) -> Result<Statement> {
 fn parse_select_count(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "count")?.trim_start();
     let (column_name, rest) = take_parenthesized(rest)?;
-    let column_name = column_name.trim();
-    validate_identifier(column_name)?;
+    let column_name = parse_identifier_only(column_name)?;
+    validate_identifier(&column_name)?;
 
     let rest = strip_keyword(rest.trim_start(), "from")?.trim_start();
     let (table_name, trailing) = split_leading_identifier(rest)?;
-    validate_identifier(table_name)?;
+    validate_identifier(&table_name)?;
 
     let trailing = trailing.trim_start();
     let where_clause = if trailing.is_empty() {
@@ -490,8 +505,8 @@ fn parse_select_count(sql: &str) -> Result<Statement> {
     };
 
     Ok(Statement::SelectCount {
-        table: table_name.to_string(),
-        column: column_name.to_string(),
+        table: table_name,
+        column: column_name,
         where_clause,
     })
 }
@@ -499,7 +514,7 @@ fn parse_select_count(sql: &str) -> Result<Statement> {
 fn parse_desc(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "desc")?.trim_start();
     let (table_name, trailing) = split_leading_identifier(rest)?;
-    validate_identifier(table_name)?;
+    validate_identifier(&table_name)?;
     if !trailing.trim().is_empty() {
         return Err(SqlRockError::new(format!(
             "unexpected trailing SQL: {}",
@@ -507,9 +522,7 @@ fn parse_desc(sql: &str) -> Result<Statement> {
         )));
     }
 
-    Ok(Statement::DescribeTable {
-        table: table_name.to_string(),
-    })
+    Ok(Statement::DescribeTable { table: table_name })
 }
 
 fn parse_describe(sql: &str) -> Result<Statement> {
@@ -533,7 +546,7 @@ fn parse_show_create_table(sql: &str) -> Result<Statement> {
 fn parse_alter_table(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "alter table")?.trim_start();
     let (table, rest) = split_leading_identifier(rest)?;
-    validate_identifier(table)?;
+    validate_identifier(&table)?;
     let rest = rest.trim_start();
     let action = if starts_with_keyword(rest, "add column") {
         AlterTableAction::Add(parse_column_definition(
@@ -546,24 +559,21 @@ fn parse_alter_table(sql: &str) -> Result<Statement> {
     } else if starts_with_keyword(rest, "change column") {
         let rest = strip_keyword(rest, "change column")?.trim_start();
         let (old_name, rest) = split_leading_identifier(rest)?;
-        validate_identifier(old_name)?;
+        validate_identifier(&old_name)?;
         AlterTableAction::Change {
-            old_name: old_name.to_string(),
+            old_name,
             column: parse_column_definition(rest.trim_start())?,
         }
     } else {
         return Err(SqlRockError::new("unsupported ALTER TABLE action"));
     };
-    Ok(Statement::AlterTable {
-        table: table.to_string(),
-        action,
-    })
+    Ok(Statement::AlterTable { table, action })
 }
 
 fn parse_drop_table(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "drop table")?.trim_start();
     let (table_name, trailing) = split_leading_identifier(rest)?;
-    validate_identifier(table_name)?;
+    validate_identifier(&table_name)?;
     if !trailing.trim().is_empty() {
         return Err(SqlRockError::new(format!(
             "unexpected trailing SQL: {}",
@@ -571,24 +581,20 @@ fn parse_drop_table(sql: &str) -> Result<Statement> {
         )));
     }
 
-    Ok(Statement::DropTable {
-        table: table_name.to_string(),
-    })
+    Ok(Statement::DropTable { table: table_name })
 }
 
 fn parse_delete_from(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "delete from")?.trim_start();
     let (table_name, trailing) = split_leading_identifier(rest)?;
-    validate_identifier(table_name)?;
+    validate_identifier(&table_name)?;
 
     if trailing.trim().is_empty() {
-        Ok(Statement::DeleteAll {
-            table: table_name.to_string(),
-        })
+        Ok(Statement::DeleteAll { table: table_name })
     } else {
         let where_clause = parse_where_clause(trailing.trim_start())?;
         Ok(Statement::DeleteFrom {
-            table: table_name.to_string(),
+            table: table_name,
             where_clause,
         })
     }
@@ -603,7 +609,7 @@ fn parse_truncate_table(sql: &str) -> Result<Statement> {
 fn parse_update(sql: &str) -> Result<Statement> {
     let rest = strip_keyword(sql, "update")?.trim_start();
     let (table_name, trailing) = split_leading_identifier(rest)?;
-    validate_identifier(table_name)?;
+    validate_identifier(&table_name)?;
 
     let trailing = trailing.trim_start();
     let after_set = strip_keyword(trailing, "set")?.trim_start();
@@ -621,13 +627,13 @@ fn parse_update(sql: &str) -> Result<Statement> {
 
     if set_clauses.len() == 1 {
         Ok(Statement::Update {
-            table: table_name.to_string(),
+            table: table_name,
             set_clause: set_clauses.into_iter().next().expect("checked length"),
             where_clause,
         })
     } else {
         Ok(Statement::UpdateMany {
-            table: table_name.to_string(),
+            table: table_name,
             set_clauses,
             where_clause,
         })
@@ -641,34 +647,28 @@ fn parse_table_only(
 ) -> Result<Statement> {
     let rest = strip_keyword(sql, keyword)?.trim_start();
     let (table, trailing) = split_leading_identifier(rest)?;
-    validate_identifier(table)?;
+    validate_identifier(&table)?;
     if !trailing.trim().is_empty() {
         return Err(SqlRockError::new("unexpected trailing SQL"));
     }
-    Ok(build(table.to_string()))
+    Ok(build(table))
 }
 
 fn parse_column_definition(sql: &str) -> Result<Column> {
-    let mut parts = sql.split_whitespace();
-    let name = parts
-        .next()
-        .ok_or_else(|| SqlRockError::new("expected column name"))?;
-    validate_identifier(name)?;
-    let data_type = parts.collect::<Vec<_>>().join(" ");
+    let (name, rest) = split_leading_identifier(sql)?;
+    validate_identifier(&name)?;
+    let data_type = rest.trim_start().to_string();
     if data_type.is_empty() {
         return Err(SqlRockError::new("expected column type"));
     }
     validate_data_type(&data_type)?;
-    Ok(Column {
-        name: name.to_string(),
-        data_type,
-    })
+    Ok(Column { name, data_type })
 }
 
 fn parse_where_clause(sql: &str) -> Result<WhereClause> {
     let rest = strip_keyword(sql, "where")?.trim_start();
     let (column_name, rest) = split_leading_identifier(rest)?;
-    validate_identifier(column_name)?;
+    validate_identifier(&column_name)?;
 
     let rest = rest.trim_start();
     let rest = strip_keyword(rest, "=")?.trim_start();
@@ -680,23 +680,24 @@ fn parse_where_clause(sql: &str) -> Result<WhereClause> {
 
     let value = parse_value(rest)?;
     Ok(WhereClause {
-        column: column_name.to_string(),
+        column: column_name,
         value,
     })
 }
 
 fn parse_set_clause(sql: &str) -> Result<SetClause> {
-    let Some((column_name, value_sql)) = sql.split_once('=') else {
+    let (column_name, rest) = split_leading_identifier(sql)?;
+    validate_identifier(&column_name)?;
+    let value_sql = strip_keyword(rest.trim_start(), "=")?.trim_start();
+    if value_sql.is_empty() {
         return Err(SqlRockError::new(
             "SET clause requires a value: SET column = value",
         ));
-    };
-    let column_name = column_name.trim();
-    validate_identifier(column_name)?;
-    let value = parse_value(value_sql.trim())?;
+    }
+    let value = parse_value(value_sql)?;
 
     Ok(SetClause {
-        column: column_name.to_string(),
+        column: column_name,
         value,
     })
 }
@@ -705,6 +706,12 @@ fn parse_value(value: &str) -> Result<String> {
     let value = value.trim();
     if value.eq_ignore_ascii_case("null") {
         return Ok(SQL_NULL.to_string());
+    }
+    if is_now_function(value) {
+        return Ok(now_string());
+    }
+    if is_function_call(value, "today") {
+        return Ok(today_string());
     }
 
     if value.starts_with('\'') {
@@ -720,15 +727,46 @@ fn parse_value(value: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-fn split_name_and_parenthesized_with_trailing(input: &str) -> Result<(&str, &str, &str)> {
+fn is_now_function(value: &str) -> bool {
+    is_function_call(value, "now")
+}
+
+fn is_function_call(value: &str, name: &str) -> bool {
+    let value = value.trim();
+    value
+        .get(..name.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
+        && value[name.len()..].trim_start() == "()"
+}
+
+fn split_name_and_parenthesized_with_trailing(input: &str) -> Result<(String, &str, &str)> {
     let (name, rest) = split_leading_identifier(input)?;
     let rest = rest.trim_start();
     let (inside, trailing) = take_parenthesized(rest)?;
     Ok((name, inside, trailing))
 }
 
-fn split_leading_identifier(input: &str) -> Result<(&str, &str)> {
+fn split_leading_identifier(input: &str) -> Result<(String, &str)> {
     let input = input.trim_start();
+    if let Some(rest) = input.strip_prefix('`') {
+        let mut identifier = String::new();
+        let mut chars = rest.char_indices().peekable();
+        while let Some((index, ch)) = chars.next() {
+            if ch == '`' {
+                if chars.peek().is_some_and(|(_, next)| *next == '`') {
+                    chars.next();
+                    identifier.push('`');
+                } else {
+                    return Ok((identifier, &rest[index + ch.len_utf8()..]));
+                }
+            } else {
+                identifier.push(ch);
+            }
+        }
+
+        return Err(SqlRockError::new("unterminated quoted identifier"));
+    }
+
     let end = input
         .char_indices()
         .find(|(_, ch)| !is_identifier_char(*ch))
@@ -739,7 +777,18 @@ fn split_leading_identifier(input: &str) -> Result<(&str, &str)> {
         return Err(SqlRockError::new("expected identifier"));
     }
 
-    Ok((&input[..end], &input[end..]))
+    Ok((input[..end].to_string(), &input[end..]))
+}
+
+fn parse_identifier_only(input: &str) -> Result<String> {
+    let (identifier, trailing) = split_leading_identifier(input)?;
+    if !trailing.trim().is_empty() {
+        return Err(SqlRockError::new(format!(
+            "unexpected trailing SQL: {}",
+            trailing.trim()
+        )));
+    }
+    Ok(identifier)
 }
 
 fn take_parenthesized(input: &str) -> Result<(&str, &str)> {

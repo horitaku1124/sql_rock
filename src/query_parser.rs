@@ -291,6 +291,16 @@ impl Parser {
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("null") => {
                 Ok(Expr::Literal(String::new()))
             }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("now") => {
+                self.expect_symbol('(')?;
+                self.expect_symbol(')')?;
+                Ok(Expr::Now)
+            }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("today") => {
+                self.expect_symbol('(')?;
+                self.expect_symbol(')')?;
+                Ok(Expr::Today)
+            }
             Some(Token::Word(mut word)) => {
                 if self.consume_symbol('.') {
                     word.push('.');
@@ -437,6 +447,24 @@ fn tokenize(sql: &str) -> Result<Vec<Token>> {
                 }
             }
             tokens.push(Token::String(value));
+        } else if ch == '`' {
+            let mut word = String::new();
+            loop {
+                let Some(next) = chars.next() else {
+                    return Err(SqlRockError::new("unterminated quoted identifier"));
+                };
+                if next == '`' {
+                    if chars.peek() == Some(&'`') {
+                        chars.next();
+                        word.push('`');
+                    } else {
+                        break;
+                    }
+                } else {
+                    word.push(next);
+                }
+            }
+            tokens.push(Token::Word(word));
         } else if ch.is_ascii_digit()
             || (ch == '-' && chars.peek().is_some_and(|c| c.is_ascii_digit()))
         {

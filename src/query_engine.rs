@@ -1,3 +1,4 @@
+use crate::datetime::{now_string, today_string};
 use crate::error::{Result, SqlRockError};
 use crate::model::{
     Aggregate, CompareOp, Condition, Expr, JoinKind, OrderBy, SelectItem, SelectQuery,
@@ -273,6 +274,8 @@ fn evaluate_expr(
             .cloned()
             .ok_or_else(|| SqlRockError::new(format!("unknown column `{column}`"))),
         Expr::Literal(value) => Ok(value.clone()),
+        Expr::Now => Ok(now_string()),
+        Expr::Today => Ok(today_string()),
         Expr::Aggregate(aggregate, expr) => {
             evaluate_aggregate(aggregate, expr, group, load_table, outer_row)
         }
@@ -480,6 +483,8 @@ fn expr_label(expr: &Expr) -> String {
         Expr::All => "*".to_string(),
         Expr::Column(column) => column.clone(),
         Expr::Literal(value) => value.clone(),
+        Expr::Now => "now()".to_string(),
+        Expr::Today => "today()".to_string(),
         Expr::Aggregate(aggregate, expr) => {
             format!("{}({})", aggregate_label(aggregate), expr_label(expr))
         }

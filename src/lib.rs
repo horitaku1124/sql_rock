@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod data_type;
 pub mod database;
+pub mod datetime;
 pub mod error;
 pub mod model;
 pub mod parser;
@@ -55,6 +56,29 @@ mod tests {
         database.execute(parse_statement(sql).unwrap()).unwrap()
     }
 
+    fn is_timestamp(value: &str) -> bool {
+        value.len() == 19
+            && value.as_bytes()[4] == b'-'
+            && value.as_bytes()[7] == b'-'
+            && value.as_bytes()[10] == b' '
+            && value.as_bytes()[13] == b':'
+            && value.as_bytes()[16] == b':'
+            && value
+                .chars()
+                .enumerate()
+                .all(|(index, ch)| matches!(index, 4 | 7 | 10 | 13 | 16) || ch.is_ascii_digit())
+    }
+
+    fn is_date(value: &str) -> bool {
+        value.len() == 10
+            && value.as_bytes()[4] == b'-'
+            && value.as_bytes()[7] == b'-'
+            && value
+                .chars()
+                .enumerate()
+                .all(|(index, ch)| matches!(index, 4 | 7) || ch.is_ascii_digit())
+    }
+
     #[test]
     fn parses_create_table() {
         let statement = parse_statement("CREATE TABLE users (id INT, name VARCHAR(255));").unwrap();
@@ -74,6 +98,31 @@ mod tests {
                     Column {
                         name: "name".to_string(),
                         data_type: "VARCHAR(255)".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_create_table_with_quoted_identifiers() {
+        let statement = parse_statement("CREATE TABLE `users` (`id` INT, `name` TEXT);").unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users".to_string(),
+                comment: None,
+                options: Vec::new(),
+                auto_increment_start: None,
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT".to_string(),
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "TEXT".to_string(),
                     },
                 ],
             }
@@ -198,6 +247,43 @@ mod tests {
                     name: "id".to_string(),
                     data_type: "INT".to_string(),
                 }],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_create_table_with_default_charset_option() {
+        let statement = parse_statement(
+            "CREATE TABLE `users5` (`id` INT, `name` TEXT) ENGINE = INNODB DEFAULT CHARSET=utf8mb4 COMMENT='ユーザ情報テーブル';",
+        )
+        .unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users5".to_string(),
+                comment: Some("ユーザ情報テーブル".to_string()),
+                options: vec![
+                    TableOption {
+                        name: "ENGINE".to_string(),
+                        value: "INNODB".to_string(),
+                    },
+                    TableOption {
+                        name: "DEFAULT CHARSET".to_string(),
+                        value: "utf8mb4".to_string(),
+                    },
+                ],
+                auto_increment_start: None,
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT".to_string(),
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "TEXT".to_string(),
+                    },
+                ],
             }
         );
     }
@@ -786,6 +872,44 @@ mod tests {
     }
 
     #[test]
+    fn stores_and_shows_default_charset_option() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE `users5` (`id` INT, `name` TEXT) ENGINE = INNODB DEFAULT CHARSET=utf8mb4 COMMENT='ユーザ情報テーブル';",
+        );
+
+        let table =
+            parse_table_file(&fs::read_to_string(root.join("users5.table")).unwrap()).unwrap();
+
+        assert_eq!(table.comment, Some("ユーザ情報テーブル".to_string()));
+        assert_eq!(
+            table.options,
+            vec![
+                TableOption {
+                    name: "ENGINE".to_string(),
+                    value: "INNODB".to_string(),
+                },
+                TableOption {
+                    name: "DEFAULT CHARSET".to_string(),
+                    value: "utf8mb4".to_string(),
+                },
+            ]
+        );
+        assert!(
+            fs::read_to_string(root.join("users5.table"))
+                .unwrap()
+                .contains("options:ENGINE:INNODB|DEFAULT CHARSET:utf8mb4\n")
+        );
+        assert_eq!(
+            execute_sql(&database, "SHOW CREATE TABLE users5;"),
+            "Table\tCreate Table\nusers5\tCREATE TABLE users5 (id INT, name TEXT) COMMENT='ユーザ情報テーブル' ENGINE=INNODB DEFAULT CHARSET=utf8mb4"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn create_table_supports_comment_and_auto_increment_options_in_any_order() {
         let root = test_dir();
         let database = Database::new(&root);
@@ -834,6 +958,123 @@ mod tests {
         assert_eq!(filtered_output, "id\tname\n1\tAlice");
         assert_eq!(filtered_name_output, "id\tname\n2\tBob");
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn quoted_identifiers_work_across_basic_queries() {
+        let root = test_dir();
+        let database = Database::new(&root);
+
+        assert_eq!(
+            execute_sql(&database, "CREATE TABLE `users` (`id` INT, `name` TEXT);"),
+            "created table `users`"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Alice');"
+            ),
+            "inserted 1 row into `users`"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT `id`, `name` FROM `users` WHERE `id` = 1;"
+            ),
+            "id\tname\n1\tAlice"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "UPDATE `users` SET `name` = 'Bob' WHERE `id` = 1;"
+            ),
+            "updated 1 row(s) in `users`"
+        );
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM `users` WHERE `name` = 'Bob';"),
+            "id\tname\n1\tBob"
+        );
+        assert_eq!(
+            execute_sql(&database, "DELETE FROM `users` WHERE `id` = 1;"),
+            "deleted 1 row(s) from `users`"
+        );
+        assert_eq!(
+            execute_sql(&database, "DESC `users`;"),
+            "Field\tType\nid\tINT\nname\tTEXT"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn insert_and_update_accept_now_function() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE events (id INT, created_at DATETIME, updated_at TIMESTAMP);",
+        );
+
+        execute_sql(
+            &database,
+            "INSERT INTO events (id, created_at, updated_at) VALUES (1, now(), now());",
+        );
+        execute_sql(
+            &database,
+            "UPDATE events SET updated_at = now() WHERE id = 1;",
+        );
+
+        let output = execute_sql(&database, "SELECT * FROM events;");
+        let row = output.lines().nth(1).unwrap();
+        let values = row.split('\t').collect::<Vec<_>>();
+        assert_eq!(values[0], "1");
+        assert!(is_timestamp(values[1]));
+        assert!(is_timestamp(values[2]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn select_conditions_accept_now_function() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE events (id INT, created_at DATETIME);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO events (id, created_at) VALUES (1, '2000-01-01 00:00:00'), (2, now()), (3, '9999-12-31 23:59:59');",
+        );
+
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT id FROM events WHERE created_at <= now() ORDER BY id;"
+            ),
+            "id\n1\n2"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT id FROM events WHERE created_at BETWEEN '2000-01-01 00:00:00' AND now() ORDER BY id;"
+            ),
+            "id\n1\n2"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn select_list_accepts_now_function() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(&database, "CREATE TABLE events (id INT);");
+        execute_sql(&database, "INSERT INTO events (id) VALUES (1);");
+
+        let output = execute_sql(&database, "SELECT now() FROM events;");
+        let value = output.lines().nth(1).unwrap();
+        assert_eq!(output.lines().next().unwrap(), "now()");
+        assert!(is_timestamp(value));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -943,6 +1184,74 @@ mod tests {
 
         assert_eq!(output, "updated 0 row(s) in `users`");
         assert_eq!(select_output, "id\tname\n1\tAlice\n2\tBob");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn insert_and_update_accept_today_function() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE events (id INT, event_date DATE, updated_date DATE);",
+        );
+
+        execute_sql(
+            &database,
+            "INSERT INTO events (id, event_date, updated_date) VALUES (1, today(), today());",
+        );
+        execute_sql(
+            &database,
+            "UPDATE events SET updated_date = today() WHERE id = 1;",
+        );
+
+        let output = execute_sql(&database, "SELECT * FROM events;");
+        let row = output.lines().nth(1).unwrap();
+        let values = row.split('\t').collect::<Vec<_>>();
+        assert_eq!(values[0], "1");
+        assert!(is_date(values[1]));
+        assert!(is_date(values[2]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn select_conditions_accept_today_function() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(&database, "CREATE TABLE events (id INT, event_date DATE);");
+        execute_sql(
+            &database,
+            "INSERT INTO events (id, event_date) VALUES (1, '2000-01-01'), (2, today()), (3, '9999-12-31');",
+        );
+
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT id FROM events WHERE event_date <= today() ORDER BY id;"
+            ),
+            "id\n1\n2"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT id FROM events WHERE event_date BETWEEN '2000-01-01' AND today() ORDER BY id;"
+            ),
+            "id\n1\n2"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn select_list_accepts_today_function() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(&database, "CREATE TABLE events (id INT);");
+        execute_sql(&database, "INSERT INTO events (id) VALUES (1);");
+
+        let output = execute_sql(&database, "SELECT today() FROM events;");
+        let value = output.lines().nth(1).unwrap();
+        assert_eq!(output.lines().next().unwrap(), "today()");
+        assert!(is_date(value));
         fs::remove_dir_all(root).unwrap();
     }
 
