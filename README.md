@@ -37,3 +37,9 @@ Use `--data-dir` to choose a different storage directory.
 ```
 cargo run -- --data-dir ./data "CREATE TABLE users (id INT, name TEXT);"
 ```
+
+### REPL
+
+```
+cargo run -- --data-dir ./data --repl
+```
