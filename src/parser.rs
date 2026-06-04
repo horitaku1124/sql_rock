@@ -2,6 +2,7 @@ use crate::data_type::{
     has_primary_key, has_unique_key, validate_auto_increment_columns, validate_data_type,
     validate_key_columns,
 };
+use crate::datetime::{now_string, today_string};
 use crate::error::{Result, SqlRockError};
 use crate::model::{
     AlterTableAction, Column, SQL_NULL, SetClause, Statement, TableOption, WhereClause,
@@ -706,6 +707,12 @@ fn parse_value(value: &str) -> Result<String> {
     if value.eq_ignore_ascii_case("null") {
         return Ok(SQL_NULL.to_string());
     }
+    if is_now_function(value) {
+        return Ok(now_string());
+    }
+    if is_function_call(value, "today") {
+        return Ok(today_string());
+    }
 
     if value.starts_with('\'') {
         if !value.ends_with('\'') || value.len() < 2 {
@@ -718,6 +725,18 @@ fn parse_value(value: &str) -> Result<String> {
     }
 
     Ok(value.to_string())
+}
+
+fn is_now_function(value: &str) -> bool {
+    is_function_call(value, "now")
+}
+
+fn is_function_call(value: &str, name: &str) -> bool {
+    let value = value.trim();
+    value
+        .get(..name.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
+        && value[name.len()..].trim_start() == "()"
 }
 
 fn split_name_and_parenthesized_with_trailing(input: &str) -> Result<(&str, &str, &str)> {

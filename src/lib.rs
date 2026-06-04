@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod data_type;
 pub mod database;
+pub mod datetime;
 pub mod error;
 pub mod model;
 pub mod parser;
@@ -53,6 +54,29 @@ mod tests {
 
     fn execute_sql(database: &Database, sql: &str) -> String {
         database.execute(parse_statement(sql).unwrap()).unwrap()
+    }
+
+    fn is_timestamp(value: &str) -> bool {
+        value.len() == 19
+            && value.as_bytes()[4] == b'-'
+            && value.as_bytes()[7] == b'-'
+            && value.as_bytes()[10] == b' '
+            && value.as_bytes()[13] == b':'
+            && value.as_bytes()[16] == b':'
+            && value
+                .chars()
+                .enumerate()
+                .all(|(index, ch)| matches!(index, 4 | 7 | 10 | 13 | 16) || ch.is_ascii_digit())
+    }
+
+    fn is_date(value: &str) -> bool {
+        value.len() == 10
+            && value.as_bytes()[4] == b'-'
+            && value.as_bytes()[7] == b'-'
+            && value
+                .chars()
+                .enumerate()
+                .all(|(index, ch)| matches!(index, 4 | 7) || ch.is_ascii_digit())
     }
 
     #[test]
@@ -838,6 +862,77 @@ mod tests {
     }
 
     #[test]
+    fn insert_and_update_accept_now_function() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE events (id INT, created_at DATETIME, updated_at TIMESTAMP);",
+        );
+
+        execute_sql(
+            &database,
+            "INSERT INTO events (id, created_at, updated_at) VALUES (1, now(), now());",
+        );
+        execute_sql(
+            &database,
+            "UPDATE events SET updated_at = now() WHERE id = 1;",
+        );
+
+        let output = execute_sql(&database, "SELECT * FROM events;");
+        let row = output.lines().nth(1).unwrap();
+        let values = row.split('\t').collect::<Vec<_>>();
+        assert_eq!(values[0], "1");
+        assert!(is_timestamp(values[1]));
+        assert!(is_timestamp(values[2]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn select_conditions_accept_now_function() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE events (id INT, created_at DATETIME);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO events (id, created_at) VALUES (1, '2000-01-01 00:00:00'), (2, now()), (3, '9999-12-31 23:59:59');",
+        );
+
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT id FROM events WHERE created_at <= now() ORDER BY id;"
+            ),
+            "id\n1\n2"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT id FROM events WHERE created_at BETWEEN '2000-01-01 00:00:00' AND now() ORDER BY id;"
+            ),
+            "id\n1\n2"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn select_list_accepts_now_function() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(&database, "CREATE TABLE events (id INT);");
+        execute_sql(&database, "INSERT INTO events (id) VALUES (1);");
+
+        let output = execute_sql(&database, "SELECT now() FROM events;");
+        let value = output.lines().nth(1).unwrap();
+        assert_eq!(output.lines().next().unwrap(), "now()");
+        assert!(is_timestamp(value));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn describe_table_returns_schema() {
         let (root, database) = setup_users_table();
 
@@ -943,6 +1038,74 @@ mod tests {
 
         assert_eq!(output, "updated 0 row(s) in `users`");
         assert_eq!(select_output, "id\tname\n1\tAlice\n2\tBob");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn insert_and_update_accept_today_function() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE events (id INT, event_date DATE, updated_date DATE);",
+        );
+
+        execute_sql(
+            &database,
+            "INSERT INTO events (id, event_date, updated_date) VALUES (1, today(), today());",
+        );
+        execute_sql(
+            &database,
+            "UPDATE events SET updated_date = today() WHERE id = 1;",
+        );
+
+        let output = execute_sql(&database, "SELECT * FROM events;");
+        let row = output.lines().nth(1).unwrap();
+        let values = row.split('\t').collect::<Vec<_>>();
+        assert_eq!(values[0], "1");
+        assert!(is_date(values[1]));
+        assert!(is_date(values[2]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn select_conditions_accept_today_function() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(&database, "CREATE TABLE events (id INT, event_date DATE);");
+        execute_sql(
+            &database,
+            "INSERT INTO events (id, event_date) VALUES (1, '2000-01-01'), (2, today()), (3, '9999-12-31');",
+        );
+
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT id FROM events WHERE event_date <= today() ORDER BY id;"
+            ),
+            "id\n1\n2"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT id FROM events WHERE event_date BETWEEN '2000-01-01' AND today() ORDER BY id;"
+            ),
+            "id\n1\n2"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn select_list_accepts_today_function() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(&database, "CREATE TABLE events (id INT);");
+        execute_sql(&database, "INSERT INTO events (id) VALUES (1);");
+
+        let output = execute_sql(&database, "SELECT today() FROM events;");
+        let value = output.lines().nth(1).unwrap();
+        assert_eq!(output.lines().next().unwrap(), "today()");
+        assert!(is_date(value));
         fs::remove_dir_all(root).unwrap();
     }
 

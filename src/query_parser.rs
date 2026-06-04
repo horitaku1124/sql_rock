@@ -291,6 +291,16 @@ impl Parser {
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("null") => {
                 Ok(Expr::Literal(String::new()))
             }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("now") => {
+                self.expect_symbol('(')?;
+                self.expect_symbol(')')?;
+                Ok(Expr::Now)
+            }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("today") => {
+                self.expect_symbol('(')?;
+                self.expect_symbol(')')?;
+                Ok(Expr::Today)
+            }
             Some(Token::Word(mut word)) => {
                 if self.consume_symbol('.') {
                     word.push('.');

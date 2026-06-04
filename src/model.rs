@@ -93,6 +93,8 @@ pub enum Expr {
     All,
     Column(String),
     Literal(String),
+    Now,
+    Today,
     Aggregate(Aggregate, Box<Expr>),
     Case {
         branches: Vec<(Condition, Box<Expr>)>,
