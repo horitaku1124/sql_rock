@@ -1,7 +1,9 @@
 use crate::data_type::{
-    has_auto_increment, has_not_null, has_primary_key, has_unique_key,
+    has_auto_increment, has_default_current_timestamp, has_not_null,
+    has_on_update_current_timestamp, has_primary_key, has_unique_key, is_timestamp_or_datetime,
     validate_auto_increment_columns, validate_key_columns,
 };
+use crate::datetime::now_string;
 use crate::error::{Result, SqlRockError};
 use crate::model::{AlterTableAction, Column, SQL_NULL, SetClause, Statement, Table, WhereClause};
 use crate::query_engine::execute_query;
@@ -131,6 +133,7 @@ impl Database {
         }
 
         apply_auto_increment(&mut table, &mut row)?;
+        apply_current_timestamp_defaults(&table, &mut row, &provided);
         validate_not_null_values(&table, &row, &provided)?;
         validate_key_values(&table, &row, None)?;
         normalize_null_values(&mut row);
@@ -377,6 +380,7 @@ impl Database {
             if row.get(where_index) == Some(&where_clause.value) {
                 let value = normalize_updated_value(&table.columns[set_index], &set_clause.value)?;
                 row[set_index] = value;
+                apply_on_update_current_timestamps(&table, row, &[set_index]);
                 updated_count += 1;
             }
         }
@@ -414,6 +418,8 @@ impl Database {
                 for (index, value) in &updates {
                     row[*index] = value.clone();
                 }
+                let explicit_indexes = updates.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+                apply_on_update_current_timestamps(&table, row, &explicit_indexes);
                 updated_count += 1;
             }
         }
@@ -464,10 +470,40 @@ fn apply_auto_increment(table: &mut Table, row: &mut [String]) -> Result<()> {
     Ok(())
 }
 
+fn apply_current_timestamp_defaults(table: &Table, row: &mut [String], provided: &[bool]) {
+    let now = now_string();
+    for (index, column) in table.columns.iter().enumerate() {
+        if !provided[index]
+            && is_timestamp_or_datetime(&column.data_type)
+            && has_default_current_timestamp(&column.data_type)
+        {
+            row[index] = now.clone();
+        }
+    }
+}
+
+fn apply_on_update_current_timestamps(
+    table: &Table,
+    row: &mut [String],
+    explicit_indexes: &[usize],
+) {
+    let now = now_string();
+    for (index, column) in table.columns.iter().enumerate() {
+        if !explicit_indexes.contains(&index)
+            && is_timestamp_or_datetime(&column.data_type)
+            && has_on_update_current_timestamp(&column.data_type)
+        {
+            row[index] = now.clone();
+        }
+    }
+}
+
 fn validate_not_null_values(table: &Table, row: &[String], provided: &[bool]) -> Result<()> {
     for (index, column) in table.columns.iter().enumerate() {
+        let value = row.get(index);
         if has_not_null(&column.data_type)
-            && (!provided[index] || row.get(index).is_some_and(|value| value == SQL_NULL))
+            && (value.is_some_and(|value| value == SQL_NULL)
+                || (!provided[index] && value.is_none_or(|value| value.is_empty())))
         {
             return Err(SqlRockError::new(format!(
                 "column `{}` cannot be NULL",

@@ -1094,6 +1094,75 @@ mod tests {
     }
 
     #[test]
+    fn insert_uses_current_timestamp_default_for_omitted_temporal_columns() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE t1 (id INT, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, dt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP);",
+        );
+
+        execute_sql(&database, "INSERT INTO t1 (id) VALUES (1);");
+
+        let output = execute_sql(&database, "SELECT * FROM t1;");
+        let row = output.lines().nth(1).unwrap();
+        let values = row.split('\t').collect::<Vec<_>>();
+        assert_eq!(values[0], "1");
+        assert!(is_timestamp(values[1]));
+        assert!(is_timestamp(values[2]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn update_applies_on_update_current_timestamp_to_implicit_temporal_columns() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE t1 (id INT, name TEXT, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, dt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO t1 (id, name, ts, dt) VALUES (1, 'Alice', '2000-01-01 00:00:00', '2000-01-01 00:00:00');",
+        );
+
+        execute_sql(&database, "UPDATE t1 SET name = 'Bob' WHERE id = 1;");
+
+        let output = execute_sql(&database, "SELECT * FROM t1;");
+        let row = output.lines().nth(1).unwrap();
+        let values = row.split('\t').collect::<Vec<_>>();
+        assert_eq!(values[0], "1");
+        assert_eq!(values[1], "Bob");
+        assert!(is_timestamp(values[2]));
+        assert!(is_timestamp(values[3]));
+        assert_ne!(values[2], "2000-01-01 00:00:00");
+        assert_ne!(values[3], "2000-01-01 00:00:00");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_update_value_overrides_on_update_current_timestamp() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE t1 (id INT, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP);",
+        );
+        execute_sql(&database, "INSERT INTO t1 (id) VALUES (1);");
+
+        execute_sql(
+            &database,
+            "UPDATE t1 SET ts = '2000-01-01 00:00:00' WHERE id = 1;",
+        );
+
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM t1;"),
+            "id\tts\n1\t2000-01-01 00:00:00"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn select_conditions_accept_now_function() {
         let root = test_dir();
         let database = Database::new(&root);

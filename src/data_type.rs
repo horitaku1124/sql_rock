@@ -118,6 +118,27 @@ pub fn has_unique_key(data_type: &str) -> bool {
         .any(|part| part.eq_ignore_ascii_case("UNIQUE"))
 }
 
+pub fn has_default_current_timestamp(data_type: &str) -> bool {
+    let parts = normalized_parts(data_type);
+    parts.windows(2).any(|window| {
+        window[0].eq_ignore_ascii_case("DEFAULT")
+            && window[1].eq_ignore_ascii_case("CURRENT_TIMESTAMP")
+    })
+}
+
+pub fn has_on_update_current_timestamp(data_type: &str) -> bool {
+    let parts = normalized_parts(data_type);
+    parts.windows(3).any(|window| {
+        window[0].eq_ignore_ascii_case("ON")
+            && window[1].eq_ignore_ascii_case("UPDATE")
+            && window[2].eq_ignore_ascii_case("CURRENT_TIMESTAMP")
+    })
+}
+
+pub fn is_timestamp_or_datetime(data_type: &str) -> bool {
+    matches!(data_type_name(data_type).as_str(), "TIMESTAMP" | "DATETIME")
+}
+
 fn data_type_name(data_type: &str) -> String {
     data_type
         .trim()
@@ -132,4 +153,14 @@ fn is_integer_type(data_type: &str) -> bool {
         data_type_name(data_type).as_str(),
         "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT"
     )
+}
+
+fn normalized_parts(data_type: &str) -> Vec<String> {
+    data_type
+        .split_whitespace()
+        .map(|part| {
+            part.trim_matches(|ch| matches!(ch, '(' | ')' | ','))
+                .to_string()
+        })
+        .collect()
 }
