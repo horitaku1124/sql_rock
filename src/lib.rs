@@ -105,6 +105,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_create_table_with_quoted_identifiers() {
+        let statement = parse_statement("CREATE TABLE `users` (`id` INT, `name` TEXT);").unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users".to_string(),
+                comment: None,
+                options: Vec::new(),
+                auto_increment_start: None,
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT".to_string(),
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "TEXT".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn parses_create_table_with_primary_key_and_unique_key() {
         let statement = parse_statement(
             "CREATE TABLE users (id INT, email TEXT, PRIMARY KEY (id), UNIQUE KEY unique_email (email));",
@@ -857,6 +882,52 @@ mod tests {
         assert_eq!(output, "id\tname\n1\tAlice\n2\tBob");
         assert_eq!(filtered_output, "id\tname\n1\tAlice");
         assert_eq!(filtered_name_output, "id\tname\n2\tBob");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn quoted_identifiers_work_across_basic_queries() {
+        let root = test_dir();
+        let database = Database::new(&root);
+
+        assert_eq!(
+            execute_sql(&database, "CREATE TABLE `users` (`id` INT, `name` TEXT);"),
+            "created table `users`"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Alice');"
+            ),
+            "inserted 1 row into `users`"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT `id`, `name` FROM `users` WHERE `id` = 1;"
+            ),
+            "id\tname\n1\tAlice"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "UPDATE `users` SET `name` = 'Bob' WHERE `id` = 1;"
+            ),
+            "updated 1 row(s) in `users`"
+        );
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM `users` WHERE `name` = 'Bob';"),
+            "id\tname\n1\tBob"
+        );
+        assert_eq!(
+            execute_sql(&database, "DELETE FROM `users` WHERE `id` = 1;"),
+            "deleted 1 row(s) from `users`"
+        );
+        assert_eq!(
+            execute_sql(&database, "DESC `users`;"),
+            "Field\tType\nid\tINT\nname\tTEXT"
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

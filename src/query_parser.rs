@@ -447,6 +447,24 @@ fn tokenize(sql: &str) -> Result<Vec<Token>> {
                 }
             }
             tokens.push(Token::String(value));
+        } else if ch == '`' {
+            let mut word = String::new();
+            loop {
+                let Some(next) = chars.next() else {
+                    return Err(SqlRockError::new("unterminated quoted identifier"));
+                };
+                if next == '`' {
+                    if chars.peek() == Some(&'`') {
+                        chars.next();
+                        word.push('`');
+                    } else {
+                        break;
+                    }
+                } else {
+                    word.push(next);
+                }
+            }
+            tokens.push(Token::Word(word));
         } else if ch.is_ascii_digit()
             || (ch == '-' && chars.peek().is_some_and(|c| c.is_ascii_digit()))
         {
