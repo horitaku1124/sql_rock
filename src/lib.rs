@@ -252,6 +252,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_create_table_with_default_charset_option() {
+        let statement = parse_statement(
+            "CREATE TABLE `users5` (`id` INT, `name` TEXT) ENGINE = INNODB DEFAULT CHARSET=utf8mb4 COMMENT='ユーザ情報テーブル';",
+        )
+        .unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users5".to_string(),
+                comment: Some("ユーザ情報テーブル".to_string()),
+                options: vec![
+                    TableOption {
+                        name: "ENGINE".to_string(),
+                        value: "INNODB".to_string(),
+                    },
+                    TableOption {
+                        name: "DEFAULT CHARSET".to_string(),
+                        value: "utf8mb4".to_string(),
+                    },
+                ],
+                auto_increment_start: None,
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT".to_string(),
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "TEXT".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn parses_create_table_with_supported_data_types() {
         let data_types = [
             "TINYINT",
@@ -830,6 +867,44 @@ mod tests {
         assert_eq!(
             execute_sql(&database, "SHOW CREATE TABLE users;"),
             "Table\tCreate Table\nusers\tCREATE TABLE users (id INT, name TEXT) CHARACTER SET=utf8mb4 COLLATE=utf8mb4_bin ENGINE=InnoDB CHECKSUM=0"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stores_and_shows_default_charset_option() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE `users5` (`id` INT, `name` TEXT) ENGINE = INNODB DEFAULT CHARSET=utf8mb4 COMMENT='ユーザ情報テーブル';",
+        );
+
+        let table =
+            parse_table_file(&fs::read_to_string(root.join("users5.table")).unwrap()).unwrap();
+
+        assert_eq!(table.comment, Some("ユーザ情報テーブル".to_string()));
+        assert_eq!(
+            table.options,
+            vec![
+                TableOption {
+                    name: "ENGINE".to_string(),
+                    value: "INNODB".to_string(),
+                },
+                TableOption {
+                    name: "DEFAULT CHARSET".to_string(),
+                    value: "utf8mb4".to_string(),
+                },
+            ]
+        );
+        assert!(
+            fs::read_to_string(root.join("users5.table"))
+                .unwrap()
+                .contains("options:ENGINE:INNODB|DEFAULT CHARSET:utf8mb4\n")
+        );
+        assert_eq!(
+            execute_sql(&database, "SHOW CREATE TABLE users5;"),
+            "Table\tCreate Table\nusers5\tCREATE TABLE users5 (id INT, name TEXT) COMMENT='ユーザ情報テーブル' ENGINE=INNODB DEFAULT CHARSET=utf8mb4"
         );
         fs::remove_dir_all(root).unwrap();
     }

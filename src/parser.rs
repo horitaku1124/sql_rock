@@ -146,6 +146,20 @@ fn parse_table_options(mut trailing: &str) -> Result<TableOptions> {
                 value,
             });
             trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "default charset") {
+            let (value, rest) = parse_table_value_option(trailing, "default charset")?;
+            options.options.push(TableOption {
+                name: "DEFAULT CHARSET".to_string(),
+                value,
+            });
+            trailing = rest.trim_start();
+        } else if starts_with_keyword(trailing, "default character set") {
+            let (value, rest) = parse_table_value_option(trailing, "default character set")?;
+            options.options.push(TableOption {
+                name: "DEFAULT CHARACTER SET".to_string(),
+                value,
+            });
+            trailing = rest.trim_start();
         } else if starts_with_keyword(trailing, "collate") {
             let (value, rest) = parse_table_value_option(trailing, "collate")?;
             options.options.push(TableOption {
