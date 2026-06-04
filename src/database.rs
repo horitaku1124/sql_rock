@@ -495,8 +495,10 @@ fn validate_key_values_in_rows(
     rows: &[Vec<String>],
     skip_row: Option<usize>,
 ) -> Result<()> {
+    validate_primary_key_values_in_rows(table, row, rows, skip_row)?;
+
     for (index, column) in table.columns.iter().enumerate() {
-        if !(has_primary_key(&column.data_type) || has_unique_key(&column.data_type)) {
+        if !has_unique_key(&column.data_type) {
             continue;
         }
 
@@ -515,6 +517,52 @@ fn validate_key_values_in_rows(
                 column.name
             )));
         }
+    }
+
+    Ok(())
+}
+
+fn validate_primary_key_values_in_rows(
+    table: &Table,
+    row: &[String],
+    rows: &[Vec<String>],
+    skip_row: Option<usize>,
+) -> Result<()> {
+    let primary_key_indexes = table
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| has_primary_key(&column.data_type).then_some(index))
+        .collect::<Vec<_>>();
+
+    if primary_key_indexes.is_empty() {
+        return Ok(());
+    }
+
+    let key_values = primary_key_indexes
+        .iter()
+        .filter_map(|index| row.get(*index))
+        .cloned()
+        .collect::<Vec<_>>();
+    if key_values.len() != primary_key_indexes.len() {
+        return Ok(());
+    }
+
+    if rows.iter().enumerate().any(|(row_index, existing)| {
+        Some(row_index) != skip_row
+            && primary_key_indexes
+                .iter()
+                .all(|index| existing.get(*index) == row.get(*index))
+    }) {
+        let key_name = primary_key_indexes
+            .iter()
+            .map(|index| table.columns[*index].name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(SqlRockError::new(format!(
+            "duplicate value `{}` for key `{key_name}`",
+            key_values.join(", ")
+        )));
     }
 
     Ok(())

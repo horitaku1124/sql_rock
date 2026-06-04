@@ -158,6 +158,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_create_table_with_composite_primary_key() {
+        let statement = parse_statement(
+            "CREATE TABLE employee (employee_id INT, department_id INT, PRIMARY KEY (employee_id, department_id));",
+        )
+        .unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "employee".to_string(),
+                comment: None,
+                options: Vec::new(),
+                auto_increment_start: None,
+                columns: vec![
+                    Column {
+                        name: "employee_id".to_string(),
+                        data_type: "INT PRIMARY KEY".to_string(),
+                    },
+                    Column {
+                        name: "department_id".to_string(),
+                        data_type: "INT PRIMARY KEY".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn parses_create_table_with_table_comment() {
         let statement =
             parse_statement("CREATE TABLE users (id INT, name TEXT) COMMENT='ユーザー情報''管理';")
@@ -476,11 +504,6 @@ mod tests {
             error.to_string(),
             "unknown column `missing` in key definition"
         );
-
-        let error =
-            parse_statement("CREATE TABLE users (id INT, code INT, PRIMARY KEY (id, code));")
-                .unwrap_err();
-        assert_eq!(error.to_string(), "PRIMARY KEY supports exactly one column");
     }
 
     #[test]
@@ -517,6 +540,42 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "duplicate value `a@example.com` for key `email`"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn composite_primary_key_rejects_duplicate_key_combination() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE employee (employee_id INT, department_id INT, PRIMARY KEY (employee_id, department_id));",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO employee (employee_id, department_id) VALUES (1, 10);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO employee (employee_id, department_id) VALUES (1, 20);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO employee (employee_id, department_id) VALUES (2, 10);",
+        );
+
+        let error = database
+            .execute(
+                parse_statement(
+                    "INSERT INTO employee (employee_id, department_id) VALUES (1, 10);",
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "duplicate value `1, 10` for key `employee_id, department_id`"
         );
         fs::remove_dir_all(root).unwrap();
     }

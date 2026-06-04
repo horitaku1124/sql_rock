@@ -84,15 +84,7 @@ pub fn validate_auto_increment_columns(columns: &[Column]) -> Result<()> {
 }
 
 pub fn validate_key_columns(columns: &[Column]) -> Result<()> {
-    let primary_key_count = columns
-        .iter()
-        .filter(|column| has_primary_key(&column.data_type))
-        .count();
-
-    if primary_key_count > 1 {
-        return Err(SqlRockError::new("only one PRIMARY KEY is allowed"));
-    }
-
+    let _ = columns;
     Ok(())
 }
 
