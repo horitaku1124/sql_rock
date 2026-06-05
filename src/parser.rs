@@ -262,6 +262,7 @@ fn parse_table_value_option<'a>(input: &'a str, keyword: &str) -> Result<(String
 enum TableKeyConstraint {
     PrimaryKey(Vec<String>),
     UniqueKey(Vec<String>),
+    Key(Vec<String>),
 }
 
 fn parse_table_key_constraint(item: &str) -> Result<Option<TableKeyConstraint>> {
@@ -287,6 +288,18 @@ fn parse_table_key_constraint(item: &str) -> Result<Option<TableKeyConstraint>> 
         };
         let columns = parse_optional_named_key_columns(rest, "UNIQUE")?;
         return Ok(Some(TableKeyConstraint::UniqueKey(columns)));
+    }
+
+    if starts_with_keyword(item, "key") {
+        let rest = strip_keyword(item, "key")?.trim_start();
+        let columns = parse_optional_named_key_columns(rest, "KEY")?;
+        return Ok(Some(TableKeyConstraint::Key(columns)));
+    }
+
+    if starts_with_keyword(item, "index") {
+        let rest = strip_keyword(item, "index")?.trim_start();
+        let columns = parse_optional_named_key_columns(rest, "INDEX")?;
+        return Ok(Some(TableKeyConstraint::Key(columns)));
     }
 
     Ok(None)
@@ -338,6 +351,10 @@ fn apply_table_key_constraints(
         let (column_names, attribute) = match key_constraint {
             TableKeyConstraint::PrimaryKey(column_names) => (column_names, "PRIMARY KEY"),
             TableKeyConstraint::UniqueKey(column_names) => (column_names, "UNIQUE KEY"),
+            TableKeyConstraint::Key(column_names) => {
+                validate_key_constraint_columns(columns, column_names)?;
+                continue;
+            }
         };
 
         if attribute == "PRIMARY KEY"
@@ -366,6 +383,21 @@ fn apply_table_key_constraints(
             if !already_has_attribute {
                 column.data_type = format!("{} {attribute}", column.data_type);
             }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_key_constraint_columns(columns: &[Column], column_names: Vec<String>) -> Result<()> {
+    for column_name in column_names {
+        if !columns
+            .iter()
+            .any(|column| column.name.eq_ignore_ascii_case(&column_name))
+        {
+            return Err(SqlRockError::new(format!(
+                "unknown column `{column_name}` in key definition"
+            )));
         }
     }
 

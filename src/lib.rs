@@ -186,6 +186,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_create_table_with_plain_key_constraint() {
+        let statement =
+            parse_statement("CREATE TABLE users (id INT, name TEXT, KEY(id));").unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users".to_string(),
+                comment: None,
+                options: Vec::new(),
+                auto_increment_start: None,
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT".to_string(),
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "TEXT".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn parses_create_table_with_table_comment() {
         let statement =
             parse_statement("CREATE TABLE users (id INT, name TEXT) COMMENT='ユーザー情報''管理';")
@@ -577,6 +603,24 @@ mod tests {
             error.to_string(),
             "duplicate value `1, 10` for key `employee_id, department_id`"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plain_key_does_not_reject_duplicate_inserts() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(&database, "CREATE TABLE users (id INT, KEY(id));");
+
+        assert_eq!(
+            execute_sql(&database, "INSERT INTO users (id) VALUES (1);"),
+            "inserted 1 row into `users`"
+        );
+        assert_eq!(
+            execute_sql(&database, "INSERT INTO users (id) VALUES (1);"),
+            "inserted 1 row into `users`"
+        );
+        assert_eq!(execute_sql(&database, "SELECT * FROM users;"), "id\n1\n1");
         fs::remove_dir_all(root).unwrap();
     }
 
