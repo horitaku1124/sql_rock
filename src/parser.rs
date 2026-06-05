@@ -260,22 +260,23 @@ fn parse_table_value_option<'a>(input: &'a str, keyword: &str) -> Result<(String
 }
 
 enum TableKeyConstraint {
-    PrimaryKey(String),
-    UniqueKey(String),
+    PrimaryKey(Vec<String>),
+    UniqueKey(Vec<String>),
+    Key(Vec<String>),
 }
 
 fn parse_table_key_constraint(item: &str) -> Result<Option<TableKeyConstraint>> {
     let item = item.trim();
     if starts_with_keyword(item, "primary key") {
         let rest = strip_keyword(item, "primary key")?.trim_start();
-        let column = parse_single_key_column(rest, "PRIMARY KEY")?;
-        return Ok(Some(TableKeyConstraint::PrimaryKey(column)));
+        let columns = parse_key_columns(rest, "PRIMARY KEY")?;
+        return Ok(Some(TableKeyConstraint::PrimaryKey(columns)));
     }
 
     if starts_with_keyword(item, "unique key") {
         let rest = strip_keyword(item, "unique key")?.trim_start();
-        let column = parse_optional_named_key_column(rest, "UNIQUE KEY")?;
-        return Ok(Some(TableKeyConstraint::UniqueKey(column)));
+        let columns = parse_optional_named_key_columns(rest, "UNIQUE KEY")?;
+        return Ok(Some(TableKeyConstraint::UniqueKey(columns)));
     }
 
     if starts_with_keyword(item, "unique") {
@@ -285,23 +286,35 @@ fn parse_table_key_constraint(item: &str) -> Result<Option<TableKeyConstraint>> 
         } else {
             rest
         };
-        let column = parse_optional_named_key_column(rest, "UNIQUE")?;
-        return Ok(Some(TableKeyConstraint::UniqueKey(column)));
+        let columns = parse_optional_named_key_columns(rest, "UNIQUE")?;
+        return Ok(Some(TableKeyConstraint::UniqueKey(columns)));
+    }
+
+    if starts_with_keyword(item, "key") {
+        let rest = strip_keyword(item, "key")?.trim_start();
+        let columns = parse_optional_named_key_columns(rest, "KEY")?;
+        return Ok(Some(TableKeyConstraint::Key(columns)));
+    }
+
+    if starts_with_keyword(item, "index") {
+        let rest = strip_keyword(item, "index")?.trim_start();
+        let columns = parse_optional_named_key_columns(rest, "INDEX")?;
+        return Ok(Some(TableKeyConstraint::Key(columns)));
     }
 
     Ok(None)
 }
 
-fn parse_optional_named_key_column<'a>(rest: &'a str, constraint_name: &str) -> Result<String> {
+fn parse_optional_named_key_columns(rest: &str, constraint_name: &str) -> Result<Vec<String>> {
     if rest.trim_start().starts_with('(') {
-        return parse_single_key_column(rest, constraint_name);
+        return parse_key_columns(rest, constraint_name);
     }
 
     let (_key_name, rest) = split_leading_identifier(rest)?;
-    parse_single_key_column(rest.trim_start(), constraint_name)
+    parse_key_columns(rest.trim_start(), constraint_name)
 }
 
-fn parse_single_key_column(rest: &str, constraint_name: &str) -> Result<String> {
+fn parse_key_columns(rest: &str, constraint_name: &str) -> Result<Vec<String>> {
     let (columns_sql, trailing) = take_parenthesized(rest)?;
     if !trailing.trim().is_empty() {
         return Err(SqlRockError::new(format!(
@@ -310,20 +323,24 @@ fn parse_single_key_column(rest: &str, constraint_name: &str) -> Result<String> 
     }
 
     let columns = split_comma_separated(columns_sql);
-    if columns.len() != 1 {
-        return Err(SqlRockError::new(format!(
-            "{constraint_name} supports exactly one column"
-        )));
+    let mut key_columns = Vec::new();
+    for column_sql in columns {
+        let (column, trailing) = split_leading_identifier(column_sql.trim())?;
+        validate_identifier(&column)?;
+        if !trailing.trim().is_empty() {
+            return Err(SqlRockError::new(format!(
+                "unexpected trailing SQL in {constraint_name}"
+            )));
+        }
+        key_columns.push(column);
     }
 
-    let (column, trailing) = split_leading_identifier(columns[0].trim())?;
-    validate_identifier(&column)?;
-    if !trailing.trim().is_empty() {
+    if key_columns.is_empty() {
         return Err(SqlRockError::new(format!(
-            "unexpected trailing SQL in {constraint_name}"
+            "{constraint_name} requires at least one column"
         )));
     }
-    Ok(column)
+    Ok(key_columns)
 }
 
 fn apply_table_key_constraints(
@@ -331,26 +348,56 @@ fn apply_table_key_constraints(
     key_constraints: Vec<TableKeyConstraint>,
 ) -> Result<()> {
     for key_constraint in key_constraints {
-        let (column_name, attribute) = match key_constraint {
-            TableKeyConstraint::PrimaryKey(column_name) => (column_name, "PRIMARY KEY"),
-            TableKeyConstraint::UniqueKey(column_name) => (column_name, "UNIQUE KEY"),
+        let (column_names, attribute) = match key_constraint {
+            TableKeyConstraint::PrimaryKey(column_names) => (column_names, "PRIMARY KEY"),
+            TableKeyConstraint::UniqueKey(column_names) => (column_names, "UNIQUE KEY"),
+            TableKeyConstraint::Key(column_names) => {
+                validate_key_constraint_columns(columns, column_names)?;
+                continue;
+            }
         };
-        let Some(column) = columns
-            .iter_mut()
-            .find(|column| column.name.eq_ignore_ascii_case(&column_name))
-        else {
+
+        if attribute == "PRIMARY KEY"
+            && columns
+                .iter()
+                .any(|column| has_primary_key(&column.data_type))
+        {
+            return Err(SqlRockError::new("only one PRIMARY KEY is allowed"));
+        }
+
+        for column_name in column_names {
+            let Some(column) = columns
+                .iter_mut()
+                .find(|column| column.name.eq_ignore_ascii_case(&column_name))
+            else {
+                return Err(SqlRockError::new(format!(
+                    "unknown column `{column_name}` in key definition"
+                )));
+            };
+
+            let already_has_attribute = match attribute {
+                "PRIMARY KEY" => has_primary_key(&column.data_type),
+                "UNIQUE KEY" => has_unique_key(&column.data_type),
+                _ => false,
+            };
+            if !already_has_attribute {
+                column.data_type = format!("{} {attribute}", column.data_type);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_key_constraint_columns(columns: &[Column], column_names: Vec<String>) -> Result<()> {
+    for column_name in column_names {
+        if !columns
+            .iter()
+            .any(|column| column.name.eq_ignore_ascii_case(&column_name))
+        {
             return Err(SqlRockError::new(format!(
                 "unknown column `{column_name}` in key definition"
             )));
-        };
-
-        let already_has_attribute = match attribute {
-            "PRIMARY KEY" => has_primary_key(&column.data_type),
-            "UNIQUE KEY" => has_unique_key(&column.data_type),
-            _ => false,
-        };
-        if !already_has_attribute {
-            column.data_type = format!("{} {attribute}", column.data_type);
         }
     }
 

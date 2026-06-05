@@ -158,6 +158,60 @@ mod tests {
     }
 
     #[test]
+    fn parses_create_table_with_composite_primary_key() {
+        let statement = parse_statement(
+            "CREATE TABLE employee (employee_id INT, department_id INT, PRIMARY KEY (employee_id, department_id));",
+        )
+        .unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "employee".to_string(),
+                comment: None,
+                options: Vec::new(),
+                auto_increment_start: None,
+                columns: vec![
+                    Column {
+                        name: "employee_id".to_string(),
+                        data_type: "INT PRIMARY KEY".to_string(),
+                    },
+                    Column {
+                        name: "department_id".to_string(),
+                        data_type: "INT PRIMARY KEY".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_create_table_with_plain_key_constraint() {
+        let statement =
+            parse_statement("CREATE TABLE users (id INT, name TEXT, KEY(id));").unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "users".to_string(),
+                comment: None,
+                options: Vec::new(),
+                auto_increment_start: None,
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT".to_string(),
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "TEXT".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn parses_create_table_with_table_comment() {
         let statement =
             parse_statement("CREATE TABLE users (id INT, name TEXT) COMMENT='ユーザー情報''管理';")
@@ -476,11 +530,6 @@ mod tests {
             error.to_string(),
             "unknown column `missing` in key definition"
         );
-
-        let error =
-            parse_statement("CREATE TABLE users (id INT, code INT, PRIMARY KEY (id, code));")
-                .unwrap_err();
-        assert_eq!(error.to_string(), "PRIMARY KEY supports exactly one column");
     }
 
     #[test]
@@ -518,6 +567,60 @@ mod tests {
             error.to_string(),
             "duplicate value `a@example.com` for key `email`"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn composite_primary_key_rejects_duplicate_key_combination() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE employee (employee_id INT, department_id INT, PRIMARY KEY (employee_id, department_id));",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO employee (employee_id, department_id) VALUES (1, 10);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO employee (employee_id, department_id) VALUES (1, 20);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO employee (employee_id, department_id) VALUES (2, 10);",
+        );
+
+        let error = database
+            .execute(
+                parse_statement(
+                    "INSERT INTO employee (employee_id, department_id) VALUES (1, 10);",
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "duplicate value `1, 10` for key `employee_id, department_id`"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plain_key_does_not_reject_duplicate_inserts() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(&database, "CREATE TABLE users (id INT, KEY(id));");
+
+        assert_eq!(
+            execute_sql(&database, "INSERT INTO users (id) VALUES (1);"),
+            "inserted 1 row into `users`"
+        );
+        assert_eq!(
+            execute_sql(&database, "INSERT INTO users (id) VALUES (1);"),
+            "inserted 1 row into `users`"
+        );
+        assert_eq!(execute_sql(&database, "SELECT * FROM users;"), "id\n1\n1");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1031,6 +1134,75 @@ mod tests {
         assert_eq!(values[0], "1");
         assert!(is_timestamp(values[1]));
         assert!(is_timestamp(values[2]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn insert_uses_current_timestamp_default_for_omitted_temporal_columns() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE t1 (id INT, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, dt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP);",
+        );
+
+        execute_sql(&database, "INSERT INTO t1 (id) VALUES (1);");
+
+        let output = execute_sql(&database, "SELECT * FROM t1;");
+        let row = output.lines().nth(1).unwrap();
+        let values = row.split('\t').collect::<Vec<_>>();
+        assert_eq!(values[0], "1");
+        assert!(is_timestamp(values[1]));
+        assert!(is_timestamp(values[2]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn update_applies_on_update_current_timestamp_to_implicit_temporal_columns() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE t1 (id INT, name TEXT, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, dt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO t1 (id, name, ts, dt) VALUES (1, 'Alice', '2000-01-01 00:00:00', '2000-01-01 00:00:00');",
+        );
+
+        execute_sql(&database, "UPDATE t1 SET name = 'Bob' WHERE id = 1;");
+
+        let output = execute_sql(&database, "SELECT * FROM t1;");
+        let row = output.lines().nth(1).unwrap();
+        let values = row.split('\t').collect::<Vec<_>>();
+        assert_eq!(values[0], "1");
+        assert_eq!(values[1], "Bob");
+        assert!(is_timestamp(values[2]));
+        assert!(is_timestamp(values[3]));
+        assert_ne!(values[2], "2000-01-01 00:00:00");
+        assert_ne!(values[3], "2000-01-01 00:00:00");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_update_value_overrides_on_update_current_timestamp() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE t1 (id INT, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP);",
+        );
+        execute_sql(&database, "INSERT INTO t1 (id) VALUES (1);");
+
+        execute_sql(
+            &database,
+            "UPDATE t1 SET ts = '2000-01-01 00:00:00' WHERE id = 1;",
+        );
+
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM t1;"),
+            "id\tts\n1\t2000-01-01 00:00:00"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
