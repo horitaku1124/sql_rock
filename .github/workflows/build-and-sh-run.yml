@@ -21,7 +21,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build binary
-        run: cargo build
+        run: cargo build --bins
 
       - name: Run built binary checks
         run: bash scripts/build-and-sh-run-check.sh
+
+      - name: Run server and client checks
+        run: bash scripts/server-client-tests.sh
