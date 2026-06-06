@@ -28,6 +28,12 @@ jobs:
       - name: Run unit tests
         run: cargo test
 
+      - name: Build all binaries
+        run: cargo build --bins
+
+      - name: Test server and client integration
+        run: bash scripts/server-client-tests.sh
+
   build-check:
     name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
@@ -63,6 +69,6 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build target
-        run: cargo build --target ${{ matrix.target }}
+        run: cargo build --bins --target ${{ matrix.target }}
         env:
           CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
