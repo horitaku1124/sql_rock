@@ -59,6 +59,19 @@ if [[ "$OUTPUT" != "$EXPECTED" ]]; then
   exit 1
 fi
 
+NOW_OUTPUT="$(
+  MYSQL_PWD=sqlrock "$ROOT_DIR/target/debug/sql_rock_client" \
+    --host 127.0.0.1 \
+    --port "$PORT" \
+    --user sqlrock \
+    --execute "SELECT NOW()"
+)"
+
+if [[ ! "$NOW_OUTPUT" =~ ^now\(\)$'\n'[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
+  printf 'Unexpected SELECT NOW() output:\n%s\n' "$NOW_OUTPUT"
+  exit 1
+fi
+
 if MYSQL_PWD=wrong "$ROOT_DIR/target/debug/sql_rock_client" \
   --host 127.0.0.1 \
   --port "$PORT" \

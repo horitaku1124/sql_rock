@@ -140,6 +140,10 @@ fn evaluate_source(
     outer_row: Option<&Row>,
 ) -> Result<DataSet> {
     match source {
+        SelectSource::Unit => Ok(DataSet {
+            columns: Vec::new(),
+            rows: vec![Row::new()],
+        }),
         SelectSource::Table { name, alias } => {
             let table = load_table(name)?;
             let columns = table

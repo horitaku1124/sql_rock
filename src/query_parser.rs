@@ -36,8 +36,11 @@ impl Parser {
         self.expect_word("select")?;
         let distinct = self.consume_word("distinct");
         let items = self.parse_select_items()?;
-        self.expect_word("from")?;
-        let source = self.parse_source()?;
+        let source = if self.consume_word("from") {
+            self.parse_source()?
+        } else {
+            SelectSource::Unit
+        };
         let mut joins = Vec::new();
 
         while let Some(kind) = self.parse_join_kind() {

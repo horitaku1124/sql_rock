@@ -1251,6 +1251,32 @@ mod tests {
     }
 
     #[test]
+    fn select_without_from_evaluates_expressions() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let database = Database::new(&root);
+
+        let output = execute_sql(&database, "SELECT NOW();");
+        let mut lines = output.lines();
+        assert_eq!(lines.next(), Some("now()"));
+        assert!(is_timestamp(lines.next().unwrap()));
+
+        assert_eq!(
+            execute_sql(&database, "SELECT 1 AS value, 'Alice' AS name;"),
+            "value\tname\n1\tAlice"
+        );
+        assert_eq!(
+            execute_sql(&database, "SELECT 1 AS value WHERE 1 = 1;"),
+            "value\n1"
+        );
+        assert_eq!(
+            execute_sql(&database, "SELECT 1 AS value WHERE 1 = 2;"),
+            "value"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn describe_table_returns_schema() {
         let (root, database) = setup_users_table();
 
