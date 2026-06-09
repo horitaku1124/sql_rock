@@ -96,6 +96,14 @@ pub enum Expr {
     Literal(String),
     Now,
     Today,
+    Function {
+        name: String,
+        args: Vec<Expr>,
+    },
+    Interval {
+        value: Box<Expr>,
+        unit: String,
+    },
     Aggregate(Aggregate, Box<Expr>),
     Case {
         branches: Vec<(Condition, Box<Expr>)>,

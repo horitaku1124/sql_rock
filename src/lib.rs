@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod data_type;
 pub mod database;
+pub mod date_functions;
 pub mod datetime;
 pub mod error;
 pub mod model;
@@ -1272,6 +1273,68 @@ mod tests {
         assert_eq!(
             execute_sql(&database, "SELECT 1 AS value WHERE 1 = 2;"),
             "value"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn date_functions_extract_and_name_date_parts() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let database = Database::new(&root);
+
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT DATE('2024-06-09 12:34:56'), TIME('2024-06-09 12:34:56'), YEAR('2024-06-09'), MONTH('2024-06-09'), DAY('2024-06-09'), HOUR('12:34:56'), MINUTE('12:34:56'), SECOND('12:34:56');"
+            ),
+            "date(2024-06-09 12:34:56)\ttime(2024-06-09 12:34:56)\tyear(2024-06-09)\tmonth(2024-06-09)\tday(2024-06-09)\thour(12:34:56)\tminute(12:34:56)\tsecond(12:34:56)\n2024-06-09\t12:34:56\t2024\t6\t9\t12\t34\t56"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT DAYNAME('2024-06-09'), MONTHNAME('2024-06-09'), DAYOFWEEK('2024-06-09'), WEEKDAY('2024-06-09'), DAYOFYEAR('2024-06-09'), QUARTER('2024-06-09'), LAST_DAY('2024-02-10');"
+            ),
+            "dayname(2024-06-09)\tmonthname(2024-06-09)\tdayofweek(2024-06-09)\tweekday(2024-06-09)\tdayofyear(2024-06-09)\tquarter(2024-06-09)\tlast_day(2024-02-10)\nSunday\tJune\t1\t6\t161\t2\t2024-02-29"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn date_functions_add_compare_and_extract_intervals() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let database = Database::new(&root);
+
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT DATE_ADD('2018-05-01', INTERVAL 1 DAY), DATE_SUB('2018-05-01', INTERVAL 1 YEAR), DATEDIFF('2007-12-31 23:59:59', '2007-12-30'), TIMESTAMPADD(DAY, 2, '2024-01-01'), TIMESTAMPDIFF(DAY, '2024-01-01', '2024-01-03'), EXTRACT(YEAR FROM '2024-06-09');"
+            ),
+            "date_add(2018-05-01, interval 1 day)\tdate_sub(2018-05-01, interval 1 year)\tdatediff(2007-12-31 23:59:59, 2007-12-30)\ttimestampadd(DAY, 2, 2024-01-01)\ttimestampdiff(DAY, 2024-01-01, 2024-01-03)\textract(YEAR, 2024-06-09)\n2018-05-02\t2017-05-01\t1\t2024-01-03\t2\t2024"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn date_functions_convert_and_format_values() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let database = Database::new(&root);
+
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT TIME_TO_SEC('01:02:03'), SEC_TO_TIME(3723), MAKEDATE(2024, 60), MAKETIME(1, 2, 3), PERIOD_ADD(202401, 2), PERIOD_DIFF(202403, 202401);"
+            ),
+            "time_to_sec(01:02:03)\tsec_to_time(3723)\tmakedate(2024, 60)\tmaketime(1, 2, 3)\tperiod_add(202401, 2)\tperiod_diff(202403, 202401)\n3723\t01:02:03\t2024-02-29\t01:02:03\t202403\t2"
+        );
+        assert_eq!(
+            execute_sql(
+                &database,
+                "SELECT DATE_FORMAT('2024-06-09 12:34:56', '%Y/%m/%d'), STR_TO_DATE('2024-06-09', '%Y-%m-%d'), CONVERT_TZ('2024-06-09 00:00:00', '+00:00', '+09:00'), GET_FORMAT(DATE, 'USA');"
+            ),
+            "date_format(2024-06-09 12:34:56, %Y/%m/%d)\tstr_to_date(2024-06-09, %Y-%m-%d)\tconvert_tz(2024-06-09 00:00:00, +00:00, +09:00)\tget_format(DATE, USA)\n2024/06/09\t2024-06-09\t2024-06-09 09:00:00\t%m.%d.%Y"
         );
         fs::remove_dir_all(root).unwrap();
     }
