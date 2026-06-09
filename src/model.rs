@@ -51,6 +51,7 @@ pub struct SelectQuery {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectSource {
+    Unit,
     Table {
         name: String,
         alias: String,
