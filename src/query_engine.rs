@@ -1,3 +1,4 @@
+use crate::date_functions::{DateFunctionArg, evaluate_date_function};
 use crate::datetime::{now_string, today_string};
 use crate::error::{Result, SqlRockError};
 use crate::model::{
@@ -280,6 +281,24 @@ fn evaluate_expr(
         Expr::Literal(value) => Ok(value.clone()),
         Expr::Now => Ok(now_string()),
         Expr::Today => Ok(today_string()),
+        Expr::Function { name, args } => {
+            let args = args
+                .iter()
+                .map(|arg| match arg {
+                    Expr::Interval { value, unit } => Ok(DateFunctionArg::Interval {
+                        value: evaluate_expr(value, row, group, load_table, outer_row)?,
+                        unit: unit.clone(),
+                    }),
+                    _ => Ok(DateFunctionArg::Value(evaluate_expr(
+                        arg, row, group, load_table, outer_row,
+                    )?)),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            evaluate_date_function(name, &args)
+        }
+        Expr::Interval { .. } => Err(SqlRockError::new(
+            "INTERVAL can only be used as a date function argument",
+        )),
         Expr::Aggregate(aggregate, expr) => {
             evaluate_aggregate(aggregate, expr, group, load_table, outer_row)
         }
@@ -489,6 +508,18 @@ fn expr_label(expr: &Expr) -> String {
         Expr::Literal(value) => value.clone(),
         Expr::Now => "now()".to_string(),
         Expr::Today => "today()".to_string(),
+        Expr::Function { name, args } => format!(
+            "{}({})",
+            name.to_ascii_lowercase(),
+            args.iter().map(expr_label).collect::<Vec<_>>().join(", ")
+        ),
+        Expr::Interval { value, unit } => {
+            format!(
+                "interval {} {}",
+                expr_label(value),
+                unit.to_ascii_lowercase()
+            )
+        }
         Expr::Aggregate(aggregate, expr) => {
             format!("{}({})", aggregate_label(aggregate), expr_label(expr))
         }
@@ -509,6 +540,8 @@ fn aggregate_label(aggregate: &Aggregate) -> &'static str {
 fn contains_aggregate(expr: &Expr) -> bool {
     match expr {
         Expr::Aggregate(_, _) => true,
+        Expr::Function { args, .. } => args.iter().any(contains_aggregate),
+        Expr::Interval { value, .. } => contains_aggregate(value),
         Expr::Case { branches, fallback } => {
             branches.iter().any(|(_, expr)| contains_aggregate(expr))
                 || contains_aggregate(fallback)

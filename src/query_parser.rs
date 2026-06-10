@@ -304,7 +304,51 @@ impl Parser {
                 self.expect_symbol(')')?;
                 Ok(Expr::Today)
             }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("interval") => {
+                let value = Box::new(self.parse_expr()?);
+                let unit = self.expect_identifier()?;
+                Ok(Expr::Interval { value, unit })
+            }
+            Some(Token::Word(word))
+                if is_current_datetime_keyword(&word)
+                    && self.peek() != Some(&Token::Symbol('(')) =>
+            {
+                Ok(Expr::Function {
+                    name: word,
+                    args: Vec::new(),
+                })
+            }
             Some(Token::Word(mut word)) => {
+                if self.consume_symbol('(') {
+                    if word.eq_ignore_ascii_case("extract") {
+                        let unit = self.expect_identifier()?;
+                        self.expect_word("from")?;
+                        let value = self.parse_expr()?;
+                        self.expect_symbol(')')?;
+                        return Ok(Expr::Function {
+                            name: word,
+                            args: vec![Expr::Literal(unit), value],
+                        });
+                    }
+                    let mut args = Vec::new();
+                    if has_identifier_first_argument(&word) && !self.consume_symbol(')') {
+                        args.push(Expr::Literal(self.expect_identifier()?));
+                        if self.consume_symbol(')') {
+                            return Ok(Expr::Function { name: word, args });
+                        }
+                        self.expect_symbol(',')?;
+                    }
+                    if !self.consume_symbol(')') {
+                        loop {
+                            args.push(self.parse_expr()?);
+                            if self.consume_symbol(')') {
+                                break;
+                            }
+                            self.expect_symbol(',')?;
+                        }
+                    }
+                    return Ok(Expr::Function { name: word, args });
+                }
                 if self.consume_symbol('.') {
                     word.push('.');
                     word.push_str(&self.expect_identifier()?);
@@ -520,6 +564,25 @@ fn parse_aggregate(word: &str) -> Option<Aggregate> {
     } else {
         None
     }
+}
+
+fn is_current_datetime_keyword(word: &str) -> bool {
+    [
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "localtime",
+        "localtimestamp",
+    ]
+    .iter()
+    .any(|name| word.eq_ignore_ascii_case(name))
+}
+
+fn has_identifier_first_argument(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "timestampadd" | "timestampdiff" | "get_format"
+    )
 }
 
 fn is_clause_word(word: &str) -> bool {
