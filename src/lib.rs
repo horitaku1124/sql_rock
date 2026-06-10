@@ -3,6 +3,7 @@ pub mod data_type;
 pub mod database;
 pub mod date_functions;
 pub mod datetime;
+pub mod dump;
 pub mod error;
 pub mod model;
 pub mod parser;

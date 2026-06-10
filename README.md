@@ -43,3 +43,14 @@ cargo run -- --data-dir ./data "CREATE TABLE users (id INT, name TEXT);"
 ```
 cargo run -- --data-dir ./data --repl
 ```
+
+### Dump
+
+`sql_rock_dump` outputs restorable `CREATE TABLE` and `INSERT INTO` statements.
+
+```sh
+cargo run --bin sql_rock_dump -- --data-dir ./data > backup.sql
+cargo run --bin sql_rock_dump -- --data-dir ./data users
+cargo run --bin sql_rock_dump -- --data-dir ./data --no-data
+cargo run --bin sql_rock_dump -- --data-dir ./data --result-file backup.sql
+```
