@@ -1140,6 +1140,34 @@ mod tests {
     }
 
     #[test]
+    fn insert_accepts_mysql_current_date_and_timestamp_functions() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE items (id INT AUTO_INCREMENT, dt1 DATETIME, dt2 DATE, dt3 TIMESTAMP);",
+        );
+
+        execute_sql(
+            &database,
+            "INSERT INTO items (dt1, dt2, dt3) VALUES (now(), CURDATE(), CURRENT_TIMESTAMP());",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO items (dt1, dt2, dt3) VALUES (CURRENT_TIMESTAMP, CURRENT_DATE, LOCALTIME);",
+        );
+
+        let output = execute_sql(&database, "SELECT * FROM items;");
+        for row in output.lines().skip(1) {
+            let values = row.split('\t').collect::<Vec<_>>();
+            assert!(is_timestamp(values[1]));
+            assert!(is_date(values[2]));
+            assert!(is_timestamp(values[3]));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn insert_uses_current_timestamp_default_for_omitted_temporal_columns() {
         let root = test_dir();
         let database = Database::new(&root);
