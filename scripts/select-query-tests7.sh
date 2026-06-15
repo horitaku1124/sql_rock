@@ -11,29 +11,25 @@ echo "--- $0 start ---"
 
 $CMD "CREATE TABLE items (\
    id INT AUTO_INCREMENT, \
-   name VARCHAR \
+   dt1 DATETIME, \
+   dt2 DATE, \
+   dt3 TIMESTAMP \
  );"
-$CMD "INSERT INTO items (name) VALUES \
-  ('TV'), \
-  ('Chair') \
-;"
-$CMD "INSERT INTO items (id,name) VALUES \
-  (3, 'Light') \
+$CMD "INSERT INTO items (dt1, dt2, dt3) VALUES \
+  (now(), CURDATE(), CURRENT_TIMESTAMP) \
 ;"
 
+$CMD "SELECT * FROM items"
 SQL_CASES=(
   "SELECT count(1) FROM items"
-  "SELECT * FROM items ORDER BY id"
+  "SELECT date_format(dt1, '%Y-%m-%d') as df FROM items"
 )
 #
 EXPECTED_CASES=(
 $'count(1)
-3'
-$'id	name
-1	TV
-2	Chair
-3	Light'
-
+1'
+$'df
+'$(date '+%Y-%m-%d')
 )
 # Success test patter
 run_sql_cases "$CMD" SQL_CASES EXPECTED_CASES

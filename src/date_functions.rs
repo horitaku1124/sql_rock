@@ -1,4 +1,4 @@
-use crate::datetime::{now_string, today_string};
+use crate::datetime::{now_string, today_string, utc_now_string};
 use crate::error::{Result, SqlRockError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,15 +35,15 @@ pub fn evaluate_date_function(name: &str, args: &[DateFunctionArg]) -> Result<St
         }
         "UTC_TIMESTAMP" => {
             require_arity(args, 0, 1)?;
-            Ok(now_string())
+            Ok(utc_now_string())
         }
         "UTC_DATE" => {
             require_arity(args, 0, 0)?;
-            Ok(now_string()[..10].to_string())
+            Ok(utc_now_string()[..10].to_string())
         }
         "UTC_TIME" => {
             require_arity(args, 0, 1)?;
-            Ok(now_string()[11..].to_string())
+            Ok(utc_now_string()[11..].to_string())
         }
         "DATE" => unary_datetime(args, |dt| format_date(dt)),
         "TIME" => unary_datetime(args, |dt| format_time(dt)),

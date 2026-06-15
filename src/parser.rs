@@ -754,10 +754,10 @@ fn parse_value(value: &str) -> Result<String> {
     if value.eq_ignore_ascii_case("null") {
         return Ok(SQL_NULL.to_string());
     }
-    if is_now_function(value) {
+    if is_now_value(value) {
         return Ok(now_string());
     }
-    if is_function_call(value, "today") {
+    if is_today_value(value) {
         return Ok(today_string());
     }
 
@@ -774,8 +774,20 @@ fn parse_value(value: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-fn is_now_function(value: &str) -> bool {
-    is_function_call(value, "now")
+fn is_now_value(value: &str) -> bool {
+    ["now", "current_timestamp", "localtime", "localtimestamp"]
+        .iter()
+        .any(|name| {
+            is_function_call(value, name)
+                || (!name.eq_ignore_ascii_case("now") && value.eq_ignore_ascii_case(name))
+        })
+}
+
+fn is_today_value(value: &str) -> bool {
+    is_function_call(value, "today")
+        || is_function_call(value, "curdate")
+        || is_function_call(value, "current_date")
+        || value.eq_ignore_ascii_case("current_date")
 }
 
 fn is_function_call(value: &str, name: &str) -> bool {
