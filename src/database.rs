@@ -5,7 +5,10 @@ use crate::data_type::{
 };
 use crate::datetime::now_string;
 use crate::error::{Result, SqlRockError};
-use crate::model::{AlterTableAction, Column, SQL_NULL, SetClause, Statement, Table, WhereClause};
+use crate::model::{
+    AlterTableAction, Column, ForeignKey, ReferentialAction, SQL_NULL, SetClause, Statement, Table,
+    WhereClause,
+};
 use crate::query_engine::execute_query;
 use crate::storage::{parse_table_file, serialize_table};
 use std::fs;
@@ -25,10 +28,18 @@ impl Database {
             Statement::CreateTable {
                 name,
                 columns,
+                foreign_keys,
                 comment,
                 options,
                 auto_increment_start,
-            } => self.create_table(&name, columns, comment, options, auto_increment_start),
+            } => self.create_table(
+                &name,
+                columns,
+                foreign_keys,
+                comment,
+                options,
+                auto_increment_start,
+            ),
             Statement::InsertInto {
                 table,
                 columns,
@@ -80,6 +91,7 @@ impl Database {
         &self,
         name: &str,
         columns: Vec<Column>,
+        foreign_keys: Vec<ForeignKey>,
         comment: Option<String>,
         options: Vec<crate::model::TableOption>,
         auto_increment_start: Option<u64>,
@@ -87,6 +99,7 @@ impl Database {
         fs::create_dir_all(&self.root)?;
         validate_auto_increment_columns(&columns)?;
         validate_key_columns(&columns)?;
+        self.validate_foreign_key_definitions(name, &columns, &foreign_keys)?;
 
         let path = self.table_path(name)?;
         if path.exists() {
@@ -96,6 +109,7 @@ impl Database {
         let mut table = Table {
             name: name.to_string(),
             columns,
+            foreign_keys,
             comment,
             options,
             auto_increment_next: auto_increment_start,
@@ -137,6 +151,7 @@ impl Database {
         validate_not_null_values(&table, &row, &provided)?;
         validate_key_values(&table, &row, None)?;
         normalize_null_values(&mut row);
+        self.validate_foreign_key_values(&table, &row)?;
         table.rows.push(row);
         fs::write(path, serialize_table(&table))?;
 
@@ -236,12 +251,13 @@ impl Database {
 
     fn show_create_table(&self, table_name: &str) -> Result<String> {
         let table = self.read_table(table_name)?;
-        let columns = table
+        let mut definitions = table
             .columns
             .iter()
             .map(|column| format!("{} {}", column.name, column.data_type))
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect::<Vec<_>>();
+        definitions.extend(table.foreign_keys.iter().map(format_foreign_key));
+        let columns = definitions.join(", ");
         let comment = table
             .comment
             .as_deref()
@@ -318,6 +334,7 @@ impl Database {
     }
 
     fn drop_table(&self, table_name: &str) -> Result<String> {
+        self.validate_table_not_referenced(table_name)?;
         let path = self.existing_table_path(table_name)?;
         fs::remove_file(path)?;
         Ok(format!("dropped table `{table_name}`"))
@@ -329,6 +346,13 @@ impl Database {
         let column_index = column_index(&table, &where_clause.column, table_name)?;
 
         let original_len = table.rows.len();
+        let deleted_rows = table
+            .rows
+            .iter()
+            .filter(|row| row.get(column_index) == Some(&where_clause.value))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.apply_referencing_delete_actions(&table, &deleted_rows)?;
         table
             .rows
             .retain(|row| row.get(column_index) != Some(&where_clause.value));
@@ -344,6 +368,7 @@ impl Database {
         let path = self.existing_table_path(table_name)?;
         let mut table = parse_table_file(&fs::read_to_string(&path)?)?;
         let deleted_count = table.rows.len();
+        self.apply_referencing_delete_actions(&table, &table.rows)?;
         table.rows.clear();
         fs::write(path, serialize_table(&table))?;
         Ok(format!(
@@ -355,6 +380,7 @@ impl Database {
         let path = self.existing_table_path(table_name)?;
         let mut table = parse_table_file(&fs::read_to_string(&path)?)?;
         let deleted_count = table.rows.len();
+        self.apply_referencing_delete_actions(&table, &table.rows)?;
         table.rows.clear();
         table.auto_increment_next = auto_increment_index(&table).map(|_| 1);
         fs::write(path, serialize_table(&table))?;
@@ -375,6 +401,7 @@ impl Database {
         let where_index = column_index(&table, &where_clause.column, table_name)?;
 
         let mut rows = table.rows.clone();
+        let old_rows = rows.clone();
         let mut updated_count = 0;
         for row in &mut rows {
             if row.get(where_index) == Some(&where_clause.value) {
@@ -386,6 +413,8 @@ impl Database {
         }
 
         validate_all_key_values(&table, &rows)?;
+        self.validate_foreign_key_rows(&table, &rows)?;
+        self.apply_referencing_update_actions(&table, &old_rows, &rows)?;
         table.rows = rows;
         sync_auto_increment_next(&mut table)?;
         fs::write(path, serialize_table(&table))?;
@@ -412,6 +441,7 @@ impl Database {
             .collect::<Result<Vec<_>>>()?;
         let where_index = column_index(&table, &where_clause.column, table_name)?;
         let mut rows = table.rows.clone();
+        let old_rows = rows.clone();
         let mut updated_count = 0;
         for row in &mut rows {
             if row.get(where_index) == Some(&where_clause.value) {
@@ -424,6 +454,8 @@ impl Database {
             }
         }
         validate_all_key_values(&table, &rows)?;
+        self.validate_foreign_key_rows(&table, &rows)?;
+        self.apply_referencing_update_actions(&table, &old_rows, &rows)?;
         table.rows = rows;
         sync_auto_increment_next(&mut table)?;
         fs::write(path, serialize_table(&table))?;
@@ -449,6 +481,318 @@ impl Database {
     fn table_path(&self, table_name: &str) -> Result<PathBuf> {
         validate_identifier(table_name)?;
         Ok(self.root.join(format!("{table_name}.table")))
+    }
+
+    fn table_paths(&self) -> Result<Vec<PathBuf>> {
+        fs::create_dir_all(&self.root)?;
+        let mut paths = fs::read_dir(&self.root)?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "table")
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        Ok(paths)
+    }
+
+    fn read_all_tables(&self) -> Result<Vec<Table>> {
+        self.table_paths()?
+            .into_iter()
+            .map(|path| parse_table_file(&fs::read_to_string(path)?))
+            .collect()
+    }
+
+    fn validate_foreign_key_definitions(
+        &self,
+        table_name: &str,
+        columns: &[Column],
+        foreign_keys: &[ForeignKey],
+    ) -> Result<()> {
+        for foreign_key in foreign_keys {
+            if foreign_key.columns.len() != foreign_key.referenced_columns.len() {
+                return Err(SqlRockError::new(
+                    "FOREIGN KEY column count must match referenced column count",
+                ));
+            }
+            for column in &foreign_key.columns {
+                if !columns
+                    .iter()
+                    .any(|item| item.name.eq_ignore_ascii_case(column))
+                {
+                    return Err(SqlRockError::new(format!(
+                        "unknown column `{column}` in foreign key definition"
+                    )));
+                }
+            }
+            let referenced = self.read_table(&foreign_key.referenced_table)?;
+            for column in &foreign_key.referenced_columns {
+                column_index(&referenced, column, &foreign_key.referenced_table)?;
+            }
+            validate_referenced_key_columns(&referenced, &foreign_key.referenced_columns)?;
+            if foreign_key.on_delete == ReferentialAction::SetNull
+                || foreign_key.on_update == ReferentialAction::SetNull
+            {
+                for column in &foreign_key.columns {
+                    let column = columns
+                        .iter()
+                        .find(|item| item.name.eq_ignore_ascii_case(column))
+                        .expect("checked above");
+                    if has_not_null(&column.data_type) {
+                        return Err(SqlRockError::new(format!(
+                            "foreign key column `{}` cannot use SET NULL because it is NOT NULL",
+                            column.name
+                        )));
+                    }
+                }
+            }
+            if foreign_key
+                .referenced_table
+                .eq_ignore_ascii_case(table_name)
+            {
+                return Err(SqlRockError::new(
+                    "self-referencing FOREIGN KEY is not supported",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_foreign_key_rows(&self, table: &Table, rows: &[Vec<String>]) -> Result<()> {
+        for row in rows {
+            self.validate_foreign_key_values(table, row)?;
+        }
+        Ok(())
+    }
+
+    fn validate_foreign_key_values(&self, table: &Table, row: &[String]) -> Result<()> {
+        for foreign_key in &table.foreign_keys {
+            let child_indexes = foreign_key_column_indexes(table, foreign_key)?;
+            let key = child_indexes
+                .iter()
+                .map(|index| row.get(*index).cloned().unwrap_or_default())
+                .collect::<Vec<_>>();
+            if key.iter().any(|value| value.is_empty()) {
+                continue;
+            }
+
+            let referenced = self.read_table(&foreign_key.referenced_table)?;
+            let referenced_indexes =
+                referenced_column_indexes(&referenced, &foreign_key.referenced_columns)?;
+            if !referenced.rows.iter().any(|referenced_row| {
+                referenced_indexes
+                    .iter()
+                    .zip(key.iter())
+                    .all(|(index, value)| referenced_row.get(*index) == Some(value))
+            }) {
+                return Err(SqlRockError::new(format!(
+                    "foreign key constraint fails on `{}`",
+                    table.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_table_not_referenced(&self, table_name: &str) -> Result<()> {
+        for table in self.read_all_tables()? {
+            if table.name.eq_ignore_ascii_case(table_name) {
+                continue;
+            }
+            if table.foreign_keys.iter().any(|foreign_key| {
+                foreign_key
+                    .referenced_table
+                    .eq_ignore_ascii_case(table_name)
+            }) {
+                return Err(SqlRockError::new(format!(
+                    "cannot drop table `{table_name}` because it is referenced by `{}`",
+                    table.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_referencing_delete_actions(
+        &self,
+        parent: &Table,
+        deleted_rows: &[Vec<String>],
+    ) -> Result<()> {
+        if deleted_rows.is_empty() {
+            return Ok(());
+        }
+
+        for mut child in self.read_all_tables()? {
+            if child.name.eq_ignore_ascii_case(&parent.name) {
+                continue;
+            }
+            let mut changed = false;
+            let foreign_keys = child.foreign_keys.clone();
+            for foreign_key in foreign_keys.iter().filter(|foreign_key| {
+                foreign_key
+                    .referenced_table
+                    .eq_ignore_ascii_case(&parent.name)
+            }) {
+                let child_indexes = foreign_key_column_indexes(&child, foreign_key)?;
+                let parent_indexes =
+                    referenced_column_indexes(parent, &foreign_key.referenced_columns)?;
+                if !child.rows.iter().any(|child_row| {
+                    deleted_rows.iter().any(|parent_row| {
+                        row_references_parent(
+                            child_row,
+                            &child_indexes,
+                            parent_row,
+                            &parent_indexes,
+                        )
+                    })
+                }) {
+                    continue;
+                }
+
+                match foreign_key.on_delete {
+                    ReferentialAction::Restrict | ReferentialAction::NoAction => {
+                        return Err(SqlRockError::new(format!(
+                            "cannot delete from `{}` because it is referenced by `{}`",
+                            parent.name, child.name
+                        )));
+                    }
+                    ReferentialAction::Cascade => {
+                        child.rows.retain(|child_row| {
+                            !deleted_rows.iter().any(|parent_row| {
+                                row_references_parent(
+                                    child_row,
+                                    &child_indexes,
+                                    parent_row,
+                                    &parent_indexes,
+                                )
+                            })
+                        });
+                        changed = true;
+                    }
+                    ReferentialAction::SetNull => {
+                        for child_row in &mut child.rows {
+                            if deleted_rows.iter().any(|parent_row| {
+                                row_references_parent(
+                                    child_row,
+                                    &child_indexes,
+                                    parent_row,
+                                    &parent_indexes,
+                                )
+                            }) {
+                                for index in &child_indexes {
+                                    child_row[*index].clear();
+                                }
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if changed {
+                fs::write(self.table_path(&child.name)?, serialize_table(&child))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_referencing_update_actions(
+        &self,
+        parent: &Table,
+        old_rows: &[Vec<String>],
+        new_rows: &[Vec<String>],
+    ) -> Result<()> {
+        let updated_pairs = old_rows
+            .iter()
+            .zip(new_rows.iter())
+            .filter(|(old_row, new_row)| old_row != new_row)
+            .collect::<Vec<_>>();
+        if updated_pairs.is_empty() {
+            return Ok(());
+        }
+
+        for mut child in self.read_all_tables()? {
+            if child.name.eq_ignore_ascii_case(&parent.name) {
+                continue;
+            }
+            let mut changed = false;
+            let foreign_keys = child.foreign_keys.clone();
+            for foreign_key in foreign_keys.iter().filter(|foreign_key| {
+                foreign_key
+                    .referenced_table
+                    .eq_ignore_ascii_case(&parent.name)
+            }) {
+                let child_indexes = foreign_key_column_indexes(&child, foreign_key)?;
+                let parent_indexes =
+                    referenced_column_indexes(parent, &foreign_key.referenced_columns)?;
+                for (old_parent_row, new_parent_row) in &updated_pairs {
+                    if parent_indexes
+                        .iter()
+                        .all(|index| old_parent_row.get(*index) == new_parent_row.get(*index))
+                    {
+                        continue;
+                    }
+                    if !child.rows.iter().any(|child_row| {
+                        row_references_parent(
+                            child_row,
+                            &child_indexes,
+                            old_parent_row,
+                            &parent_indexes,
+                        )
+                    }) {
+                        continue;
+                    }
+
+                    match foreign_key.on_update {
+                        ReferentialAction::Restrict | ReferentialAction::NoAction => {
+                            return Err(SqlRockError::new(format!(
+                                "cannot update `{}` because it is referenced by `{}`",
+                                parent.name, child.name
+                            )));
+                        }
+                        ReferentialAction::Cascade => {
+                            for child_row in &mut child.rows {
+                                if row_references_parent(
+                                    child_row,
+                                    &child_indexes,
+                                    old_parent_row,
+                                    &parent_indexes,
+                                ) {
+                                    for (child_index, parent_index) in
+                                        child_indexes.iter().zip(parent_indexes.iter())
+                                    {
+                                        child_row[*child_index] = new_parent_row
+                                            .get(*parent_index)
+                                            .cloned()
+                                            .unwrap_or_default();
+                                    }
+                                    changed = true;
+                                }
+                            }
+                        }
+                        ReferentialAction::SetNull => {
+                            for child_row in &mut child.rows {
+                                if row_references_parent(
+                                    child_row,
+                                    &child_indexes,
+                                    old_parent_row,
+                                    &parent_indexes,
+                                ) {
+                                    for index in &child_indexes {
+                                        child_row[*index].clear();
+                                    }
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if changed {
+                fs::write(self.table_path(&child.name)?, serialize_table(&child))?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -670,6 +1014,91 @@ fn column_index(table: &Table, column_name: &str, table_name: &str) -> Result<us
                 "unknown column `{column_name}` for table `{table_name}`"
             ))
         })
+}
+
+fn foreign_key_column_indexes(table: &Table, foreign_key: &ForeignKey) -> Result<Vec<usize>> {
+    foreign_key
+        .columns
+        .iter()
+        .map(|column| column_index(table, column, &table.name))
+        .collect()
+}
+
+fn referenced_column_indexes(table: &Table, columns: &[String]) -> Result<Vec<usize>> {
+    columns
+        .iter()
+        .map(|column| column_index(table, column, &table.name))
+        .collect()
+}
+
+fn validate_referenced_key_columns(table: &Table, columns: &[String]) -> Result<()> {
+    let indexes = referenced_column_indexes(table, columns)?;
+    let all_primary = indexes
+        .iter()
+        .all(|index| has_primary_key(&table.columns[*index].data_type));
+    let all_unique = indexes
+        .iter()
+        .all(|index| has_unique_key(&table.columns[*index].data_type));
+    if all_primary || all_unique {
+        Ok(())
+    } else {
+        Err(SqlRockError::new(format!(
+            "referenced columns `{}` must be indexed",
+            columns.join(", ")
+        )))
+    }
+}
+
+fn row_references_parent(
+    child_row: &[String],
+    child_indexes: &[usize],
+    parent_row: &[String],
+    parent_indexes: &[usize],
+) -> bool {
+    child_indexes
+        .iter()
+        .map(|index| child_row.get(*index).cloned().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .iter()
+        .all(|value| !value.is_empty())
+        && child_indexes
+            .iter()
+            .zip(parent_indexes.iter())
+            .all(|(child_index, parent_index)| {
+                child_row.get(*child_index) == parent_row.get(*parent_index)
+            })
+}
+
+fn format_foreign_key(foreign_key: &ForeignKey) -> String {
+    let name = foreign_key
+        .name
+        .as_deref()
+        .map(|name| format!("CONSTRAINT {name} "))
+        .unwrap_or_default();
+    let columns = foreign_key.columns.join(", ");
+    let referenced_columns = foreign_key.referenced_columns.join(", ");
+    let mut sql = format!(
+        "{name}FOREIGN KEY ({columns}) REFERENCES {} ({referenced_columns})",
+        foreign_key.referenced_table
+    );
+    if foreign_key.on_delete != ReferentialAction::Restrict {
+        sql.push_str(" ON DELETE ");
+        sql.push_str(referential_action_sql(foreign_key.on_delete));
+    }
+    if foreign_key.on_update != ReferentialAction::Restrict {
+        sql.push_str(" ON UPDATE ");
+        sql.push_str(referential_action_sql(foreign_key.on_update));
+    }
+    sql
+}
+
+fn referential_action_sql(action: ReferentialAction) -> &'static str {
+    match action {
+        ReferentialAction::Restrict => "RESTRICT",
+        ReferentialAction::Cascade => "CASCADE",
+        ReferentialAction::SetNull => "SET NULL",
+        ReferentialAction::NoAction => "NO ACTION",
+    }
 }
 
 fn ensure_column_missing(table: &Table, column_name: &str, table_name: &str) -> Result<()> {
