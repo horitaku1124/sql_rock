@@ -209,6 +209,13 @@ pub enum Statement {
     DropTable {
         table: String,
     },
+    DropTableIfExists {
+        table: String,
+    },
+    DropTables {
+        tables: Vec<String>,
+        if_exists: bool,
+    },
     DeleteFrom {
         table: String,
         where_clause: WhereClause,
@@ -235,6 +242,7 @@ pub enum Statement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterTableAction {
     Add(Column),
+    AddKey { columns: Vec<String>, unique: bool },
     Modify(Column),
     Change { old_name: String, column: Column },
 }

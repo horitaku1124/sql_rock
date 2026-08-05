@@ -2080,4 +2080,41 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn laravel_generated_ddl_is_supported() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE `users` (`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, `email` VARCHAR(255) NOT NULL) DEFAULT CHARACTER SET utf8mb4 COLLATE 'utf8mb4_unicode_ci';",
+        );
+        execute_sql(
+            &database,
+            "ALTER TABLE `users` ADD UNIQUE `users_email_unique`(`email`);",
+        );
+        execute_sql(
+            &database,
+            "ALTER TABLE `users` ADD INDEX `users_id_index`(`id`);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO users (email) VALUES ('a@example.com');",
+        );
+        let error = database
+            .execute(
+                parse_statement("INSERT INTO users (email) VALUES ('a@example.com');").unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "duplicate value `a@example.com` for key `email`"
+        );
+        assert!(database.table_exists("users").unwrap());
+        execute_sql(&database, "CREATE TABLE roles (id INT);");
+        execute_sql(&database, "DROP TABLE users, roles;");
+        execute_sql(&database, "DROP TABLE IF EXISTS users;");
+        assert!(!database.table_exists("users").unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

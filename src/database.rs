@@ -65,6 +65,8 @@ impl Database {
             Statement::ShowCreateTable { table } => self.show_create_table(&table),
             Statement::AlterTable { table, action } => self.alter_table(&table, action),
             Statement::DropTable { table } => self.drop_table(&table),
+            Statement::DropTableIfExists { table } => self.drop_table_if_exists(&table),
+            Statement::DropTables { tables, if_exists } => self.drop_tables(&tables, if_exists),
             Statement::DeleteFrom {
                 table,
                 where_clause,
@@ -288,6 +290,16 @@ impl Database {
                     row.push(String::new());
                 }
             }
+            AlterTableAction::AddKey { columns, unique } => {
+                for column_name in columns {
+                    let index = column_index(&table, &column_name, table_name)?;
+                    let data_type = &mut table.columns[index].data_type;
+                    if unique && !has_unique_key(data_type) {
+                        data_type.push(' ');
+                        data_type.push_str("UNIQUE KEY");
+                    }
+                }
+            }
             AlterTableAction::Modify(column) => {
                 let index = column_index(&table, &column.name, table_name)?;
                 table.columns[index].data_type = column.data_type;
@@ -338,6 +350,25 @@ impl Database {
         let path = self.existing_table_path(table_name)?;
         fs::remove_file(path)?;
         Ok(format!("dropped table `{table_name}`"))
+    }
+
+    fn drop_table_if_exists(&self, table_name: &str) -> Result<String> {
+        if !self.table_exists(table_name)? {
+            return Ok(format!("table `{table_name}` did not exist"));
+        }
+        self.drop_table(table_name)
+    }
+
+    fn drop_tables(&self, table_names: &[String], if_exists: bool) -> Result<String> {
+        let mut dropped = 0;
+        for table_name in table_names {
+            if if_exists && !self.table_exists(table_name)? {
+                continue;
+            }
+            self.drop_table(table_name)?;
+            dropped += 1;
+        }
+        Ok(format!("dropped {dropped} table(s)"))
     }
 
     fn delete_from(&self, table_name: &str, where_clause: WhereClause) -> Result<String> {
@@ -460,6 +491,22 @@ impl Database {
         sync_auto_increment_next(&mut table)?;
         fs::write(path, serialize_table(&table))?;
         Ok(format!("updated {updated_count} row(s) in `{table_name}`"))
+    }
+
+    pub fn table_exists(&self, table_name: &str) -> Result<bool> {
+        Ok(self.table_path(table_name)?.exists())
+    }
+
+    pub fn table_names(&self) -> Result<Vec<String>> {
+        self.table_paths()?
+            .into_iter()
+            .map(|path| {
+                path.file_stem()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+                    .ok_or_else(|| SqlRockError::new("invalid table file name"))
+            })
+            .collect()
     }
 
     fn read_table(&self, table_name: &str) -> Result<Table> {

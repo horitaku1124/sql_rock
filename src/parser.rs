@@ -250,8 +250,19 @@ fn parse_auto_increment_option(input: &str) -> Result<(u64, &str)> {
 }
 
 fn parse_table_value_option<'a>(input: &'a str, keyword: &str) -> Result<(String, &'a str)> {
-    let rest = strip_keyword(input, keyword)?.trim_start();
-    let rest = strip_keyword(rest, "=")?.trim_start();
+    let mut rest = strip_keyword(input, keyword)?.trim_start();
+    if let Some(after_equals) = rest.strip_prefix('=') {
+        rest = after_equals.trim_start();
+    }
+    if let Some(quoted) = rest.strip_prefix('\'') {
+        let Some(end) = quoted.find('\'') else {
+            return Err(SqlRockError::new(format!(
+                "unterminated table {} value",
+                keyword.to_ascii_uppercase()
+            )));
+        };
+        return Ok((quoted[..end].to_string(), &quoted[end + 1..]));
+    }
     let value_end = rest
         .char_indices()
         .find(|(_, ch)| ch.is_whitespace())
@@ -702,7 +713,34 @@ fn parse_alter_table(sql: &str) -> Result<Statement> {
     let (table, rest) = split_leading_identifier(rest)?;
     validate_identifier(&table)?;
     let rest = rest.trim_start();
-    let action = if starts_with_keyword(rest, "add column") {
+    let action = if starts_with_keyword(rest, "add unique") {
+        let mut key = strip_keyword(rest, "add unique")?.trim_start();
+        if starts_with_keyword(key, "key") {
+            key = strip_keyword(key, "key")?.trim_start();
+        } else if starts_with_keyword(key, "index") {
+            key = strip_keyword(key, "index")?.trim_start();
+        }
+        AlterTableAction::AddKey {
+            columns: parse_optional_named_key_columns(key, "ALTER TABLE ADD UNIQUE")?,
+            unique: true,
+        }
+    } else if starts_with_keyword(rest, "add index") {
+        AlterTableAction::AddKey {
+            columns: parse_optional_named_key_columns(
+                strip_keyword(rest, "add index")?.trim_start(),
+                "ALTER TABLE ADD INDEX",
+            )?,
+            unique: false,
+        }
+    } else if starts_with_keyword(rest, "add key") {
+        AlterTableAction::AddKey {
+            columns: parse_optional_named_key_columns(
+                strip_keyword(rest, "add key")?.trim_start(),
+                "ALTER TABLE ADD KEY",
+            )?,
+            unique: false,
+        }
+    } else if starts_with_keyword(rest, "add column") {
         AlterTableAction::Add(parse_column_definition(
             strip_keyword(rest, "add column")?.trim_start(),
         )?)
@@ -725,17 +763,35 @@ fn parse_alter_table(sql: &str) -> Result<Statement> {
 }
 
 fn parse_drop_table(sql: &str) -> Result<Statement> {
-    let rest = strip_keyword(sql, "drop table")?.trim_start();
-    let (table_name, trailing) = split_leading_identifier(rest)?;
-    validate_identifier(&table_name)?;
-    if !trailing.trim().is_empty() {
-        return Err(SqlRockError::new(format!(
-            "unexpected trailing SQL: {}",
-            trailing.trim()
-        )));
+    let mut rest = strip_keyword(sql, "drop table")?.trim_start();
+    let if_exists = starts_with_keyword(rest, "if exists");
+    if if_exists {
+        rest = strip_keyword(rest, "if exists")?.trim_start();
     }
+    let table_names = split_comma_separated(rest)
+        .into_iter()
+        .map(|value| {
+            let table_name = parse_identifier_only(&value)?;
+            validate_identifier(&table_name)?;
+            Ok(table_name)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if table_names.len() > 1 {
+        return Ok(Statement::DropTables {
+            tables: table_names,
+            if_exists,
+        });
+    }
+    let table_name = table_names
+        .into_iter()
+        .next()
+        .ok_or_else(|| SqlRockError::new("DROP TABLE requires a table name"))?;
 
-    Ok(Statement::DropTable { table: table_name })
+    if if_exists {
+        Ok(Statement::DropTableIfExists { table: table_name })
+    } else {
+        Ok(Statement::DropTable { table: table_name })
+    }
 }
 
 fn parse_delete_from(sql: &str) -> Result<Statement> {
