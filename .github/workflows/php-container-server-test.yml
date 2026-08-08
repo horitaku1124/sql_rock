@@ -1,0 +1,63 @@
+name: PHP Container Server Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  php-container-server-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build sql_rock_server
+        run: cargo build --bin sql_rock_server
+
+      - name: Start sql_rock_server
+        run: |
+          DATA_DIR="$(mktemp -d)"
+          echo "SQL_ROCK_SERVER_DATA_DIR=$DATA_DIR" >> "$GITHUB_ENV"
+          ./target/debug/sql_rock_server \
+            --host 0.0.0.0 \
+            --port 13307 \
+            --data-dir "$DATA_DIR" > sql-rock-server.log 2>&1 &
+          echo $! > sql-rock-server.pid
+
+          for _ in $(seq 1 50); do
+            if (echo > /dev/tcp/127.0.0.1/13307) >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 0.1
+          done
+
+          cat sql-rock-server.log
+          exit 1
+
+      - name: Build PHP test container
+        run: docker build -t sql-rock-php-server-test -f tests/php-container/Dockerfile tests/php-container
+
+      - name: Connect from PHP container
+        run: |
+          docker run --rm \
+            --add-host host.docker.internal:host-gateway \
+            -e DB_HOST=host.docker.internal \
+            sql-rock-php-server-test
+
+      - name: Stop sql_rock_server
+        if: always()
+        run: |
+          if [ -f sql-rock-server.pid ]; then
+            kill "$(cat sql-rock-server.pid)" 2>/dev/null || true
+            wait "$(cat sql-rock-server.pid)" 2>/dev/null || true
+          fi
+          rm -rf "$SQL_ROCK_SERVER_DATA_DIR"
