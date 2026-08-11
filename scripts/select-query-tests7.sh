@@ -23,11 +23,17 @@ $CMD "SELECT * FROM items"
 SQL_CASES=(
   "SELECT count(1) FROM items"
   "SELECT date_format(dt1, '%Y-%m-%d') as df FROM items"
+  "SELECT date_format(dt2, '%Y-%m-%d') as df FROM items"
+  "SELECT date_format(dt3, '%Y-%m-%d') as df FROM items"
 )
 #
 EXPECTED_CASES=(
 $'count(1)
 1'
+$'df
+'$(date '+%Y-%m-%d')
+$'df
+'$(date '+%Y-%m-%d')
 $'df
 '$(date '+%Y-%m-%d')
 )
