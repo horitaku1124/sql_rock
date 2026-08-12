@@ -1,5 +1,5 @@
 use crate::error::{Result, SqlRockError};
-use crate::model::{Column, Table, TableOption};
+use crate::model::{Column, ForeignKey, ReferentialAction, Table, TableOption};
 
 pub fn serialize_table(table: &Table) -> String {
     let mut lines = Vec::new();
@@ -14,6 +14,39 @@ pub fn serialize_table(table: &Table) -> String {
                 escape_field(&column.name),
                 escape_field(&column.data_type)
             ))
+            .collect::<Vec<_>>()
+            .join("|")
+    ));
+    lines.push(format!(
+        "foreign_keys:{}",
+        table
+            .foreign_keys
+            .iter()
+            .map(|foreign_key| {
+                [
+                    foreign_key
+                        .name
+                        .as_deref()
+                        .map(escape_field)
+                        .unwrap_or_default(),
+                    foreign_key
+                        .columns
+                        .iter()
+                        .map(|column| escape_field(column))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    escape_field(&foreign_key.referenced_table),
+                    foreign_key
+                        .referenced_columns
+                        .iter()
+                        .map(|column| escape_field(column))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    referential_action_label(foreign_key.on_delete).to_string(),
+                    referential_action_label(foreign_key.on_update).to_string(),
+                ]
+                .join(":")
+            })
             .collect::<Vec<_>>()
             .join("|")
     ));
@@ -74,9 +107,21 @@ pub fn parse_table_file(content: &str) -> Result<Table> {
     let columns = columns_line
         .strip_prefix("columns:")
         .ok_or_else(|| SqlRockError::new("invalid columns line"))?;
+    let mut foreign_keys = Vec::new();
     let mut comment = None;
     let mut options = Vec::new();
     let mut metadata_or_rows_marker = metadata_or_rows_marker;
+    if let Some(value) = metadata_or_rows_marker.strip_prefix("foreign_keys:") {
+        if !value.is_empty() {
+            foreign_keys = value
+                .split('|')
+                .map(parse_foreign_key_metadata)
+                .collect::<Result<Vec<_>>>()?;
+        }
+        metadata_or_rows_marker = lines
+            .next()
+            .ok_or_else(|| SqlRockError::new("table file is missing rows marker"))?;
+    }
     if let Some(value) = metadata_or_rows_marker.strip_prefix("comment:") {
         if !value.is_empty() {
             comment = Some(unescape_field(value)?);
@@ -163,11 +208,61 @@ pub fn parse_table_file(content: &str) -> Result<Table> {
     Ok(Table {
         name: unescape_field(name)?,
         columns,
+        foreign_keys,
         comment,
         options,
         auto_increment_next,
         rows,
     })
+}
+
+fn parse_foreign_key_metadata(value: &str) -> Result<ForeignKey> {
+    let parts = value.split(':').collect::<Vec<_>>();
+    if parts.len() != 6 {
+        return Err(SqlRockError::new("invalid foreign key metadata"));
+    }
+
+    Ok(ForeignKey {
+        name: if parts[0].is_empty() {
+            None
+        } else {
+            Some(unescape_field(parts[0])?)
+        },
+        columns: split_metadata_columns(parts[1])?,
+        referenced_table: unescape_field(parts[2])?,
+        referenced_columns: split_metadata_columns(parts[3])?,
+        on_delete: parse_referential_action(parts[4])?,
+        on_update: parse_referential_action(parts[5])?,
+    })
+}
+
+fn split_metadata_columns(value: &str) -> Result<Vec<String>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(unescape_field)
+        .collect::<Result<Vec<_>>>()
+}
+
+fn referential_action_label(action: ReferentialAction) -> &'static str {
+    match action {
+        ReferentialAction::Restrict => "RESTRICT",
+        ReferentialAction::Cascade => "CASCADE",
+        ReferentialAction::SetNull => "SET NULL",
+        ReferentialAction::NoAction => "NO ACTION",
+    }
+}
+
+fn parse_referential_action(value: &str) -> Result<ReferentialAction> {
+    match value {
+        "RESTRICT" => Ok(ReferentialAction::Restrict),
+        "CASCADE" => Ok(ReferentialAction::Cascade),
+        "SET NULL" => Ok(ReferentialAction::SetNull),
+        "NO ACTION" => Ok(ReferentialAction::NoAction),
+        _ => Err(SqlRockError::new("invalid referential action metadata")),
+    }
 }
 
 fn escape_field(value: &str) -> String {

@@ -16,10 +16,29 @@ pub struct TableOption {
 pub struct Table {
     pub name: String,
     pub columns: Vec<Column>,
+    pub foreign_keys: Vec<ForeignKey>,
     pub comment: Option<String>,
     pub options: Vec<TableOption>,
     pub auto_increment_next: Option<u64>,
     pub rows: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKey {
+    pub name: Option<String>,
+    pub columns: Vec<String>,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
+    pub on_delete: ReferentialAction,
+    pub on_update: ReferentialAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferentialAction {
+    Restrict,
+    Cascade,
+    SetNull,
+    NoAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +167,7 @@ pub enum Statement {
     CreateTable {
         name: String,
         columns: Vec<Column>,
+        foreign_keys: Vec<ForeignKey>,
         comment: Option<String>,
         options: Vec<TableOption>,
         auto_increment_start: Option<u64>,
@@ -189,6 +209,13 @@ pub enum Statement {
     DropTable {
         table: String,
     },
+    DropTableIfExists {
+        table: String,
+    },
+    DropTables {
+        tables: Vec<String>,
+        if_exists: bool,
+    },
     DeleteFrom {
         table: String,
         where_clause: WhereClause,
@@ -215,6 +242,7 @@ pub enum Statement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterTableAction {
     Add(Column),
+    AddKey { columns: Vec<String>, unique: bool },
     Modify(Column),
     Change { old_name: String, column: Column },
 }

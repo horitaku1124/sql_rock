@@ -5,7 +5,8 @@ use crate::data_type::{
 use crate::datetime::{now_string, today_string};
 use crate::error::{Result, SqlRockError};
 use crate::model::{
-    AlterTableAction, Column, SQL_NULL, SetClause, Statement, TableOption, WhereClause,
+    AlterTableAction, Column, ForeignKey, ReferentialAction, SQL_NULL, SetClause, Statement,
+    TableOption, WhereClause,
 };
 use crate::query_parser::parse_select_query;
 
@@ -82,7 +83,13 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
 
     let mut columns = Vec::new();
     let mut key_constraints = Vec::new();
+    let mut foreign_keys = Vec::new();
     for item in split_comma_separated(definition) {
+        if let Some(foreign_key) = parse_foreign_key_constraint(&item)? {
+            foreign_keys.push(foreign_key);
+            continue;
+        }
+
         if let Some(key_constraint) = parse_table_key_constraint(&item)? {
             key_constraints.push(key_constraint);
             continue;
@@ -114,6 +121,7 @@ fn parse_create_table(sql: &str) -> Result<Statement> {
     Ok(Statement::CreateTable {
         name: table_name,
         columns,
+        foreign_keys,
         comment: table_options.comment,
         options: table_options.options,
         auto_increment_start: table_options.auto_increment_start,
@@ -242,8 +250,19 @@ fn parse_auto_increment_option(input: &str) -> Result<(u64, &str)> {
 }
 
 fn parse_table_value_option<'a>(input: &'a str, keyword: &str) -> Result<(String, &'a str)> {
-    let rest = strip_keyword(input, keyword)?.trim_start();
-    let rest = strip_keyword(rest, "=")?.trim_start();
+    let mut rest = strip_keyword(input, keyword)?.trim_start();
+    if let Some(after_equals) = rest.strip_prefix('=') {
+        rest = after_equals.trim_start();
+    }
+    if let Some(quoted) = rest.strip_prefix('\'') {
+        let Some(end) = quoted.find('\'') else {
+            return Err(SqlRockError::new(format!(
+                "unterminated table {} value",
+                keyword.to_ascii_uppercase()
+            )));
+        };
+        return Ok((quoted[..end].to_string(), &quoted[end + 1..]));
+    }
     let value_end = rest
         .char_indices()
         .find(|(_, ch)| ch.is_whitespace())
@@ -303,6 +322,105 @@ fn parse_table_key_constraint(item: &str) -> Result<Option<TableKeyConstraint>> 
     }
 
     Ok(None)
+}
+
+fn parse_foreign_key_constraint(item: &str) -> Result<Option<ForeignKey>> {
+    let mut rest = item.trim();
+    let mut name = None;
+    if starts_with_keyword(rest, "constraint") {
+        rest = strip_keyword(rest, "constraint")?.trim_start();
+        let (constraint_name, after_name) = split_leading_identifier(rest)?;
+        validate_identifier(&constraint_name)?;
+        name = Some(constraint_name);
+        rest = after_name.trim_start();
+    }
+
+    if !starts_with_keyword(rest, "foreign key") {
+        return Ok(None);
+    }
+
+    rest = strip_keyword(rest, "foreign key")?.trim_start();
+    let (columns_sql, after_columns) = take_parenthesized(rest)?;
+    let columns = parse_identifier_list(columns_sql, "FOREIGN KEY")?;
+    rest = strip_keyword(after_columns.trim_start(), "references")?.trim_start();
+    let (referenced_table, after_table) = split_leading_identifier(rest)?;
+    validate_identifier(&referenced_table)?;
+    let (referenced_columns_sql, after_referenced_columns) =
+        take_parenthesized(after_table.trim_start())?;
+    let referenced_columns = parse_identifier_list(referenced_columns_sql, "REFERENCES")?;
+    if columns.len() != referenced_columns.len() {
+        return Err(SqlRockError::new(
+            "FOREIGN KEY column count must match referenced column count",
+        ));
+    }
+
+    let mut on_delete = ReferentialAction::Restrict;
+    let mut on_update = ReferentialAction::Restrict;
+    rest = after_referenced_columns.trim_start();
+    while !rest.is_empty() {
+        if starts_with_keyword(rest, "on delete") {
+            let (action, trailing) =
+                parse_referential_action(strip_keyword(rest, "on delete")?.trim_start())?;
+            on_delete = action;
+            rest = trailing.trim_start();
+        } else if starts_with_keyword(rest, "on update") {
+            let (action, trailing) =
+                parse_referential_action(strip_keyword(rest, "on update")?.trim_start())?;
+            on_update = action;
+            rest = trailing.trim_start();
+        } else {
+            return Err(SqlRockError::new(format!(
+                "unexpected trailing SQL in FOREIGN KEY: {rest}"
+            )));
+        }
+    }
+
+    Ok(Some(ForeignKey {
+        name,
+        columns,
+        referenced_table,
+        referenced_columns,
+        on_delete,
+        on_update,
+    }))
+}
+
+fn parse_identifier_list(input: &str, context: &str) -> Result<Vec<String>> {
+    let mut identifiers = Vec::new();
+    for item in split_comma_separated(input) {
+        let identifier = parse_identifier_only(&item)?;
+        validate_identifier(&identifier)?;
+        identifiers.push(identifier);
+    }
+    if identifiers.is_empty() {
+        return Err(SqlRockError::new(format!(
+            "{context} requires at least one column"
+        )));
+    }
+    Ok(identifiers)
+}
+
+fn parse_referential_action(input: &str) -> Result<(ReferentialAction, &str)> {
+    if starts_with_keyword(input, "cascade") {
+        Ok((ReferentialAction::Cascade, strip_keyword(input, "cascade")?))
+    } else if starts_with_keyword(input, "set null") {
+        Ok((
+            ReferentialAction::SetNull,
+            strip_keyword(input, "set null")?,
+        ))
+    } else if starts_with_keyword(input, "restrict") {
+        Ok((
+            ReferentialAction::Restrict,
+            strip_keyword(input, "restrict")?,
+        ))
+    } else if starts_with_keyword(input, "no action") {
+        Ok((
+            ReferentialAction::NoAction,
+            strip_keyword(input, "no action")?,
+        ))
+    } else {
+        Err(SqlRockError::new("expected referential action"))
+    }
 }
 
 fn parse_optional_named_key_columns(rest: &str, constraint_name: &str) -> Result<Vec<String>> {
@@ -595,7 +713,34 @@ fn parse_alter_table(sql: &str) -> Result<Statement> {
     let (table, rest) = split_leading_identifier(rest)?;
     validate_identifier(&table)?;
     let rest = rest.trim_start();
-    let action = if starts_with_keyword(rest, "add column") {
+    let action = if starts_with_keyword(rest, "add unique") {
+        let mut key = strip_keyword(rest, "add unique")?.trim_start();
+        if starts_with_keyword(key, "key") {
+            key = strip_keyword(key, "key")?.trim_start();
+        } else if starts_with_keyword(key, "index") {
+            key = strip_keyword(key, "index")?.trim_start();
+        }
+        AlterTableAction::AddKey {
+            columns: parse_optional_named_key_columns(key, "ALTER TABLE ADD UNIQUE")?,
+            unique: true,
+        }
+    } else if starts_with_keyword(rest, "add index") {
+        AlterTableAction::AddKey {
+            columns: parse_optional_named_key_columns(
+                strip_keyword(rest, "add index")?.trim_start(),
+                "ALTER TABLE ADD INDEX",
+            )?,
+            unique: false,
+        }
+    } else if starts_with_keyword(rest, "add key") {
+        AlterTableAction::AddKey {
+            columns: parse_optional_named_key_columns(
+                strip_keyword(rest, "add key")?.trim_start(),
+                "ALTER TABLE ADD KEY",
+            )?,
+            unique: false,
+        }
+    } else if starts_with_keyword(rest, "add column") {
         AlterTableAction::Add(parse_column_definition(
             strip_keyword(rest, "add column")?.trim_start(),
         )?)
@@ -618,17 +763,35 @@ fn parse_alter_table(sql: &str) -> Result<Statement> {
 }
 
 fn parse_drop_table(sql: &str) -> Result<Statement> {
-    let rest = strip_keyword(sql, "drop table")?.trim_start();
-    let (table_name, trailing) = split_leading_identifier(rest)?;
-    validate_identifier(&table_name)?;
-    if !trailing.trim().is_empty() {
-        return Err(SqlRockError::new(format!(
-            "unexpected trailing SQL: {}",
-            trailing.trim()
-        )));
+    let mut rest = strip_keyword(sql, "drop table")?.trim_start();
+    let if_exists = starts_with_keyword(rest, "if exists");
+    if if_exists {
+        rest = strip_keyword(rest, "if exists")?.trim_start();
     }
+    let table_names = split_comma_separated(rest)
+        .into_iter()
+        .map(|value| {
+            let table_name = parse_identifier_only(&value)?;
+            validate_identifier(&table_name)?;
+            Ok(table_name)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if table_names.len() > 1 {
+        return Ok(Statement::DropTables {
+            tables: table_names,
+            if_exists,
+        });
+    }
+    let table_name = table_names
+        .into_iter()
+        .next()
+        .ok_or_else(|| SqlRockError::new("DROP TABLE requires a table name"))?;
 
-    Ok(Statement::DropTable { table: table_name })
+    if if_exists {
+        Ok(Statement::DropTableIfExists { table: table_name })
+    } else {
+        Ok(Statement::DropTable { table: table_name })
+    }
 }
 
 fn parse_delete_from(sql: &str) -> Result<Statement> {

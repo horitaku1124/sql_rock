@@ -19,6 +19,21 @@ const COM_QUIT: u8 = 0x01;
 const COM_INIT_DB: u8 = 0x02;
 const COM_QUERY: u8 = 0x03;
 const COM_PING: u8 = 0x0e;
+const COM_STMT_PREPARE: u8 = 0x16;
+const COM_STMT_EXECUTE: u8 = 0x17;
+const COM_STMT_CLOSE: u8 = 0x19;
+const COM_STMT_RESET: u8 = 0x1a;
+
+const MYSQL_TYPE_TINY: u8 = 0x01;
+const MYSQL_TYPE_SHORT: u8 = 0x02;
+const MYSQL_TYPE_LONG: u8 = 0x03;
+const MYSQL_TYPE_FLOAT: u8 = 0x04;
+const MYSQL_TYPE_DOUBLE: u8 = 0x05;
+const MYSQL_TYPE_NULL: u8 = 0x06;
+const MYSQL_TYPE_LONGLONG: u8 = 0x08;
+const MYSQL_TYPE_INT24: u8 = 0x09;
+const MYSQL_TYPE_VAR_STRING: u8 = 0xfd;
+const MYSQL_TYPE_STRING: u8 = 0xfe;
 
 const SERVER_CAPABILITIES: u32 = CLIENT_LONG_PASSWORD
     | CLIENT_LONG_FLAG
@@ -27,6 +42,13 @@ const SERVER_CAPABILITIES: u32 = CLIENT_LONG_PASSWORD
     | CLIENT_TRANSACTIONS
     | CLIENT_SECURE_CONNECTION
     | CLIENT_PLUGIN_AUTH;
+
+#[derive(Clone)]
+struct BinaryPreparedStatement {
+    sql: String,
+    parameter_count: usize,
+    parameter_types: Vec<(u8, bool)>,
+}
 
 pub fn serve_connection(
     mut stream: TcpStream,
@@ -56,6 +78,8 @@ pub fn serve_connection(
     }
     write_ok(&mut stream, sequence.wrapping_add(1), 0, 0)?;
     let mut prepared_statements = HashMap::new();
+    let mut binary_prepared_statements = HashMap::new();
+    let mut next_statement_id = 1_u32;
 
     loop {
         let (_, packet) = match read_packet(&mut stream) {
@@ -74,6 +98,64 @@ pub fn serve_connection(
                 let sql = String::from_utf8_lossy(&packet[1..]);
                 execute_query(&mut stream, database, sql.trim(), &mut prepared_statements)?;
             }
+            COM_STMT_PREPARE => {
+                let sql = String::from_utf8_lossy(&packet[1..]).trim().to_string();
+                let parameter_count = count_placeholders(&sql);
+                let columns = prepared_column_names(database, &sql, parameter_count);
+                let statement_id = next_statement_id;
+                next_statement_id = next_statement_id.wrapping_add(1).max(1);
+                binary_prepared_statements.insert(
+                    statement_id,
+                    BinaryPreparedStatement {
+                        sql,
+                        parameter_count,
+                        parameter_types: Vec::new(),
+                    },
+                );
+                write_prepare_ok(&mut stream, statement_id, parameter_count, &columns)?;
+            }
+            COM_STMT_EXECUTE => {
+                let statement_id = packet
+                    .get(1..5)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map(u32::from_le_bytes)
+                    .ok_or_else(|| "invalid COM_STMT_EXECUTE packet".to_string())?;
+                let Some(statement) = binary_prepared_statements.get_mut(&statement_id) else {
+                    write_error(
+                        &mut stream,
+                        1,
+                        1243,
+                        "HY000",
+                        "Unknown prepared statement handler",
+                    )?;
+                    continue;
+                };
+                let parameters = match decode_execute_parameters(&packet, statement) {
+                    Ok(parameters) => parameters,
+                    Err(error) => {
+                        write_error(&mut stream, 1, 1210, "HY000", &error)?;
+                        continue;
+                    }
+                };
+                let sql = match bind_parameters(&statement.sql, &parameters) {
+                    Ok(sql) => sql,
+                    Err(error) => {
+                        write_error(&mut stream, 1, 1210, "HY000", &error)?;
+                        continue;
+                    }
+                };
+                execute_regular_query(&mut stream, database, &sql, true)?;
+            }
+            COM_STMT_CLOSE => {
+                if let Some(statement_id) = packet
+                    .get(1..5)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map(u32::from_le_bytes)
+                {
+                    binary_prepared_statements.remove(&statement_id);
+                }
+            }
+            COM_STMT_RESET => write_ok(&mut stream, 1, 0, 0)?,
             _ => write_error(
                 &mut stream,
                 1,
@@ -144,7 +226,7 @@ fn execute_query(
             Ok(sql) => sql,
             Err(error) => return write_error(stream, 1, 1210, "HY000", &error),
         };
-        return execute_regular_query(stream, database, &bound_sql);
+        return execute_regular_query(stream, database, &bound_sql, false);
     }
     if starts_with_keyword(sql, "deallocate prepare") {
         let name = match parse_deallocate(sql) {
@@ -166,14 +248,18 @@ fn execute_query(
         return write_ok(stream, 1, 0, 0);
     }
 
-    execute_regular_query(stream, database, sql)
+    execute_regular_query(stream, database, sql, false)
 }
 
 fn execute_regular_query(
     stream: &mut TcpStream,
     database: &Arc<Mutex<Database>>,
     sql: &str,
+    binary_result: bool,
 ) -> Result<(), String> {
+    if handle_compatibility_query(stream, database, sql, binary_result)? {
+        return Ok(());
+    }
     let statement = match parse_statement(sql) {
         Ok(statement) => statement,
         Err(error) => {
@@ -191,9 +277,295 @@ fn execute_regular_query(
     };
 
     if returns_rows {
-        write_result_set(stream, &output)
+        if binary_result {
+            write_binary_result_set(stream, &output)
+        } else {
+            write_result_set(stream, &output)
+        }
     } else {
         write_ok(stream, 1, affected_rows(&output), 0)
+    }
+}
+
+fn handle_compatibility_query(
+    stream: &mut TcpStream,
+    database: &Arc<Mutex<Database>>,
+    sql: &str,
+    binary_result: bool,
+) -> Result<bool, String> {
+    let sql = sql.trim().trim_end_matches(';').trim();
+    if [
+        "use",
+        "set",
+        "start transaction",
+        "begin",
+        "commit",
+        "rollback",
+        "savepoint",
+        "release savepoint",
+    ]
+    .iter()
+    .any(|keyword| starts_with_keyword(sql, keyword))
+    {
+        write_ok(stream, 1, 0, 0)?;
+        return Ok(true);
+    }
+
+    if is_information_schema_table_exists_query(sql) {
+        let table_name = extract_quoted_comparison_value(sql, "table_name")
+            .ok_or_else(|| "cannot read table_name from information_schema query".to_string())?;
+        let exists = database
+            .lock()
+            .map_err(|_| "database lock is poisoned".to_string())?
+            .table_exists(&table_name)
+            .map_err(|error| error.to_string())?;
+        let output = format!("exists\n{}", u8::from(exists));
+        if binary_result {
+            write_binary_result_set(stream, &output)?;
+        } else {
+            write_result_set(stream, &output)?;
+        }
+        return Ok(true);
+    }
+
+    if is_information_schema_table_listing_query(sql) {
+        let tables = database
+            .lock()
+            .map_err(|_| "database lock is poisoned".to_string())?
+            .table_names()
+            .map_err(|error| error.to_string())?;
+        let mut output = "name\tsize\tcomment\tengine\tcollation".to_string();
+        for table in tables {
+            output.push_str(&format!("\n{table}\t0\t\tInnoDB\tutf8mb4_unicode_ci"));
+        }
+        if binary_result {
+            write_binary_result_set(stream, &output)?;
+        } else {
+            write_result_set(stream, &output)?;
+        }
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn is_information_schema_table_exists_query(sql: &str) -> bool {
+    let normalized = sql.to_ascii_lowercase();
+    normalized.starts_with("select exists")
+        && normalized.contains("from information_schema.tables")
+        && normalized.contains("table_name")
+}
+
+fn is_information_schema_table_listing_query(sql: &str) -> bool {
+    let normalized = sql.to_ascii_lowercase();
+    normalized.starts_with("select table_name as")
+        && normalized.contains("from information_schema.tables")
+}
+
+fn extract_quoted_comparison_value(sql: &str, column: &str) -> Option<String> {
+    let lower = sql.to_ascii_lowercase();
+    let column_index = lower.find(&column.to_ascii_lowercase())?;
+    let after_column = &sql[column_index + column.len()..];
+    let equals = after_column.find('=')?;
+    let value = after_column[equals + 1..].trim_start();
+    let quoted = value.strip_prefix('\'')?;
+    let end = quoted.find('\'')?;
+    Some(quoted[..end].replace("''", "'"))
+}
+
+fn count_placeholders(sql: &str) -> usize {
+    let mut count = 0;
+    let mut in_string = false;
+    let mut in_identifier = false;
+    let mut chars = sql.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_identifier => {
+                if in_string && chars.peek() == Some(&'\'') {
+                    chars.next();
+                } else {
+                    in_string = !in_string;
+                }
+            }
+            '`' if !in_string => in_identifier = !in_identifier,
+            '?' if !in_string && !in_identifier => count += 1,
+            _ => {}
+        }
+    }
+    count
+}
+
+fn prepared_column_names(
+    database: &Arc<Mutex<Database>>,
+    sql: &str,
+    parameter_count: usize,
+) -> Vec<String> {
+    if is_information_schema_table_exists_query(sql) {
+        return vec!["exists".to_string()];
+    }
+    if is_information_schema_table_listing_query(sql) {
+        return ["name", "size", "comment", "engine", "collation"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    }
+    let parameters = vec!["NULL".to_string(); parameter_count];
+    let Ok(bound_sql) = bind_parameters(sql, &parameters) else {
+        return Vec::new();
+    };
+    let Ok(statement) = parse_statement(&bound_sql) else {
+        return Vec::new();
+    };
+    if !statement_returns_rows(&statement) {
+        return Vec::new();
+    }
+    let Ok(database) = database.lock() else {
+        return Vec::new();
+    };
+    database
+        .execute(statement)
+        .ok()
+        .and_then(|output| output.lines().next().map(str::to_string))
+        .map(|header| header.split('\t').map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn write_prepare_ok(
+    stream: &mut TcpStream,
+    statement_id: u32,
+    parameter_count: usize,
+    columns: &[String],
+) -> Result<(), String> {
+    let mut packet = vec![0x00];
+    packet.extend_from_slice(&statement_id.to_le_bytes());
+    packet.extend_from_slice(&(columns.len() as u16).to_le_bytes());
+    packet.extend_from_slice(&(parameter_count as u16).to_le_bytes());
+    packet.push(0);
+    packet.extend_from_slice(&0_u16.to_le_bytes());
+    let mut sequence = 1;
+    write_packet(stream, sequence, &packet)?;
+    sequence = sequence.wrapping_add(1);
+
+    for index in 0..parameter_count {
+        write_packet(stream, sequence, &column_definition(&format!("?{index}")))?;
+        sequence = sequence.wrapping_add(1);
+    }
+    if parameter_count > 0 {
+        write_packet(stream, sequence, &eof_packet())?;
+        sequence = sequence.wrapping_add(1);
+    }
+
+    for column in columns {
+        write_packet(stream, sequence, &column_definition(column))?;
+        sequence = sequence.wrapping_add(1);
+    }
+    if !columns.is_empty() {
+        write_packet(stream, sequence, &eof_packet())?;
+    }
+    Ok(())
+}
+
+fn decode_execute_parameters(
+    packet: &[u8],
+    statement: &mut BinaryPreparedStatement,
+) -> Result<Vec<String>, String> {
+    let mut position = 5;
+    read_bytes(packet, &mut position, 1)?;
+    read_bytes(packet, &mut position, 4)?;
+    if statement.parameter_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let null_bitmap =
+        read_bytes(packet, &mut position, statement.parameter_count.div_ceil(8))?.to_vec();
+    let new_parameters_bound = read_u8(packet, &mut position)? != 0;
+    if new_parameters_bound {
+        statement.parameter_types.clear();
+        for _ in 0..statement.parameter_count {
+            let parameter_type = read_u8(packet, &mut position)?;
+            let flags = read_u8(packet, &mut position)?;
+            statement
+                .parameter_types
+                .push((parameter_type, flags & 0x80 != 0));
+        }
+    }
+    if statement.parameter_types.len() != statement.parameter_count {
+        return Err("COM_STMT_EXECUTE is missing parameter types".to_string());
+    }
+
+    let mut parameters = Vec::with_capacity(statement.parameter_count);
+    for index in 0..statement.parameter_count {
+        if null_bitmap[index / 8] & (1 << (index % 8)) != 0 {
+            parameters.push("NULL".to_string());
+            continue;
+        }
+        let (parameter_type, unsigned) = statement.parameter_types[index];
+        parameters.push(decode_binary_parameter(
+            packet,
+            &mut position,
+            parameter_type,
+            unsigned,
+        )?);
+    }
+    Ok(parameters)
+}
+
+fn decode_binary_parameter(
+    packet: &[u8],
+    position: &mut usize,
+    parameter_type: u8,
+    unsigned: bool,
+) -> Result<String, String> {
+    match parameter_type {
+        MYSQL_TYPE_NULL => Ok("NULL".to_string()),
+        MYSQL_TYPE_TINY => {
+            let value = read_u8(packet, position)?;
+            Ok(if unsigned {
+                value.to_string()
+            } else {
+                (value as i8).to_string()
+            })
+        }
+        MYSQL_TYPE_SHORT => {
+            let bytes = read_bytes(packet, position, 2)?;
+            Ok(if unsigned {
+                u16::from_le_bytes([bytes[0], bytes[1]]).to_string()
+            } else {
+                i16::from_le_bytes([bytes[0], bytes[1]]).to_string()
+            })
+        }
+        MYSQL_TYPE_LONG | MYSQL_TYPE_INT24 => {
+            let bytes = read_bytes(packet, position, 4)?;
+            Ok(if unsigned {
+                u32::from_le_bytes(bytes.try_into().expect("four bytes")).to_string()
+            } else {
+                i32::from_le_bytes(bytes.try_into().expect("four bytes")).to_string()
+            })
+        }
+        MYSQL_TYPE_LONGLONG => {
+            let bytes = read_bytes(packet, position, 8)?;
+            Ok(if unsigned {
+                u64::from_le_bytes(bytes.try_into().expect("eight bytes")).to_string()
+            } else {
+                i64::from_le_bytes(bytes.try_into().expect("eight bytes")).to_string()
+            })
+        }
+        MYSQL_TYPE_FLOAT => {
+            let bytes = read_bytes(packet, position, 4)?;
+            Ok(f32::from_le_bytes(bytes.try_into().expect("four bytes")).to_string())
+        }
+        MYSQL_TYPE_DOUBLE => {
+            let bytes = read_bytes(packet, position, 8)?;
+            Ok(f64::from_le_bytes(bytes.try_into().expect("eight bytes")).to_string())
+        }
+        MYSQL_TYPE_VAR_STRING | MYSQL_TYPE_STRING | 0x0f | 0xfc => {
+            let length = read_lenenc_integer(packet, position)? as usize;
+            let value = String::from_utf8_lossy(read_bytes(packet, position, length)?);
+            Ok(format!("'{}'", value.replace('\'', "''")))
+        }
+        _ => Err(format!(
+            "unsupported prepared statement parameter type {parameter_type}"
+        )),
     }
 }
 
@@ -410,6 +782,37 @@ fn write_result_set(stream: &mut TcpStream, output: &str) -> Result<(), String> 
     write_packet(stream, sequence, &eof_packet())
 }
 
+fn write_binary_result_set(stream: &mut TcpStream, output: &str) -> Result<(), String> {
+    let mut lines = output.lines();
+    let headers = lines
+        .next()
+        .unwrap_or_default()
+        .split('\t')
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut sequence = 1;
+    write_packet(stream, sequence, &lenenc_int(headers.len() as u64))?;
+    sequence = sequence.wrapping_add(1);
+    for header in &headers {
+        write_packet(stream, sequence, &column_definition(header))?;
+        sequence = sequence.wrapping_add(1);
+    }
+    write_packet(stream, sequence, &eof_packet())?;
+    sequence = sequence.wrapping_add(1);
+
+    let null_bitmap_length = (headers.len() + 9) / 8;
+    for line in lines {
+        let mut row = vec![0x00];
+        row.resize(1 + null_bitmap_length, 0);
+        for value in line.split('\t') {
+            write_lenenc_bytes(&mut row, value.as_bytes());
+        }
+        write_packet(stream, sequence, &row)?;
+        sequence = sequence.wrapping_add(1);
+    }
+    write_packet(stream, sequence, &eof_packet())
+}
+
 fn handshake_packet(scramble: &[u8; 20]) -> Vec<u8> {
     let mut packet = Vec::new();
     packet.push(10);
@@ -584,6 +987,25 @@ fn read_u32_le(packet: &[u8], position: &mut usize) -> Result<u32, String> {
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
+fn read_lenenc_integer(packet: &[u8], position: &mut usize) -> Result<u64, String> {
+    match read_u8(packet, position)? {
+        value @ 0..=250 => Ok(value as u64),
+        0xfc => {
+            let bytes = read_bytes(packet, position, 2)?;
+            Ok(u16::from_le_bytes(bytes.try_into().expect("two bytes")) as u64)
+        }
+        0xfd => {
+            let bytes = read_bytes(packet, position, 3)?;
+            Ok(bytes[0] as u64 | ((bytes[1] as u64) << 8) | ((bytes[2] as u64) << 16))
+        }
+        0xfe => {
+            let bytes = read_bytes(packet, position, 8)?;
+            Ok(u64::from_le_bytes(bytes.try_into().expect("eight bytes")))
+        }
+        _ => Err("invalid length-encoded integer".to_string()),
+    }
+}
+
 fn read_bytes<'a>(
     packet: &'a [u8],
     position: &mut usize,
@@ -679,8 +1101,11 @@ fn sha1(input: &[u8]) -> [u8; 20] {
 #[cfg(test)]
 mod tests {
     use super::{
-        affected_rows, bind_parameters, constant_time_equal, handshake_packet, lenenc_int,
-        parse_deallocate, parse_execute, parse_prepare, sha1, statement_returns_rows,
+        BinaryPreparedStatement, MYSQL_TYPE_LONGLONG, MYSQL_TYPE_VAR_STRING, affected_rows,
+        bind_parameters, constant_time_equal, count_placeholders, decode_execute_parameters,
+        extract_quoted_comparison_value, handshake_packet,
+        is_information_schema_table_exists_query, is_information_schema_table_listing_query,
+        lenenc_int, parse_deallocate, parse_execute, parse_prepare, sha1, statement_returns_rows,
         verify_mysql_native_password, xor,
     };
     use sql_rock::parser::parse_statement;
@@ -735,5 +1160,43 @@ mod tests {
             "SELECT * FROM users WHERE id = 123"
         );
         assert_eq!(parse_deallocate("DEALLOCATE PREPARE stmt").unwrap(), "stmt");
+    }
+
+    #[test]
+    fn decodes_binary_prepared_statement_parameters() {
+        let mut packet = vec![0x17];
+        packet.extend_from_slice(&1_u32.to_le_bytes());
+        packet.push(0);
+        packet.extend_from_slice(&1_u32.to_le_bytes());
+        packet.push(0);
+        packet.push(1);
+        packet.extend_from_slice(&[MYSQL_TYPE_LONGLONG, 0]);
+        packet.extend_from_slice(&[MYSQL_TYPE_VAR_STRING, 0]);
+        packet.extend_from_slice(&123_i64.to_le_bytes());
+        packet.push(5);
+        packet.extend_from_slice(b"Alice");
+        let mut statement = BinaryPreparedStatement {
+            sql: "SELECT * FROM users WHERE id = ? AND name = ?".to_string(),
+            parameter_count: 2,
+            parameter_types: Vec::new(),
+        };
+
+        assert_eq!(
+            decode_execute_parameters(&packet, &mut statement).unwrap(),
+            vec!["123", "'Alice'"]
+        );
+        assert_eq!(count_placeholders("SELECT '?', ? FROM `?`"), 1);
+    }
+
+    #[test]
+    fn recognizes_laravel_information_schema_queries() {
+        let exists = "select exists (select 1 from information_schema.tables where table_schema = schema() and table_name = 'migrations') as `exists`";
+        let listing = "select table_name as `name` from information_schema.tables where table_type = 'BASE TABLE'";
+        assert!(is_information_schema_table_exists_query(exists));
+        assert!(is_information_schema_table_listing_query(listing));
+        assert_eq!(
+            extract_quoted_comparison_value(exists, "table_name"),
+            Some("migrations".to_string())
+        );
     }
 }

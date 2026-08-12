@@ -14,7 +14,9 @@ pub mod storage;
 #[cfg(test)]
 mod tests {
     use crate::database::Database;
-    use crate::model::{Column, SetClause, Statement, TableOption, WhereClause};
+    use crate::model::{
+        Column, ForeignKey, ReferentialAction, SetClause, Statement, TableOption, WhereClause,
+    };
     use crate::parser::{parse_statement, split_statements};
     use crate::storage::parse_table_file;
     use std::env;
@@ -92,6 +94,7 @@ mod tests {
                 comment: None,
                 options: Vec::new(),
                 auto_increment_start: None,
+                foreign_keys: Vec::new(),
                 columns: vec![
                     Column {
                         name: "id".to_string(),
@@ -117,6 +120,7 @@ mod tests {
                 comment: None,
                 options: Vec::new(),
                 auto_increment_start: None,
+                foreign_keys: Vec::new(),
                 columns: vec![
                     Column {
                         name: "id".to_string(),
@@ -145,6 +149,7 @@ mod tests {
                 comment: None,
                 options: Vec::new(),
                 auto_increment_start: None,
+                foreign_keys: Vec::new(),
                 columns: vec![
                     Column {
                         name: "id".to_string(),
@@ -173,6 +178,7 @@ mod tests {
                 comment: None,
                 options: Vec::new(),
                 auto_increment_start: None,
+                foreign_keys: Vec::new(),
                 columns: vec![
                     Column {
                         name: "employee_id".to_string(),
@@ -199,6 +205,7 @@ mod tests {
                 comment: None,
                 options: Vec::new(),
                 auto_increment_start: None,
+                foreign_keys: Vec::new(),
                 columns: vec![
                     Column {
                         name: "id".to_string(),
@@ -226,6 +233,7 @@ mod tests {
                 comment: Some("ユーザー情報'管理".to_string()),
                 options: Vec::new(),
                 auto_increment_start: None,
+                foreign_keys: Vec::new(),
                 columns: vec![
                     Column {
                         name: "id".to_string(),
@@ -254,6 +262,7 @@ mod tests {
                 comment: Some("users".to_string()),
                 options: Vec::new(),
                 auto_increment_start: Some(100),
+                foreign_keys: Vec::new(),
                 columns: vec![
                     Column {
                         name: "id".to_string(),
@@ -299,6 +308,7 @@ mod tests {
                     },
                 ],
                 auto_increment_start: None,
+                foreign_keys: Vec::new(),
                 columns: vec![Column {
                     name: "id".to_string(),
                     data_type: "INT".to_string(),
@@ -330,6 +340,7 @@ mod tests {
                     },
                 ],
                 auto_increment_start: None,
+                foreign_keys: Vec::new(),
                 columns: vec![
                     Column {
                         name: "id".to_string(),
@@ -338,6 +349,42 @@ mod tests {
                     Column {
                         name: "name".to_string(),
                         data_type: "TEXT".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_create_table_with_foreign_key_constraint() {
+        let statement = parse_statement(
+            "CREATE TABLE order_items (order_id INT, item_id INT, CONSTRAINT fk_order_item FOREIGN KEY (order_id, item_id) REFERENCES orders (id, item_id) ON DELETE CASCADE ON UPDATE SET NULL);",
+        )
+        .unwrap();
+
+        assert_eq!(
+            statement,
+            Statement::CreateTable {
+                name: "order_items".to_string(),
+                comment: None,
+                options: Vec::new(),
+                auto_increment_start: None,
+                foreign_keys: vec![ForeignKey {
+                    name: Some("fk_order_item".to_string()),
+                    columns: vec!["order_id".to_string(), "item_id".to_string()],
+                    referenced_table: "orders".to_string(),
+                    referenced_columns: vec!["id".to_string(), "item_id".to_string()],
+                    on_delete: ReferentialAction::Cascade,
+                    on_update: ReferentialAction::SetNull,
+                }],
+                columns: vec![
+                    Column {
+                        name: "order_id".to_string(),
+                        data_type: "INT".to_string(),
+                    },
+                    Column {
+                        name: "item_id".to_string(),
+                        data_type: "INT".to_string(),
                     },
                 ],
             }
@@ -623,6 +670,129 @@ mod tests {
             "inserted 1 row into `users`"
         );
         assert_eq!(execute_sql(&database, "SELECT * FROM users;"), "id\n1\n1");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn foreign_key_rejects_missing_parent_values() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);",
+        );
+        execute_sql(
+            &database,
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, FOREIGN KEY (user_id) REFERENCES users (id));",
+        );
+
+        let error = database
+            .execute(parse_statement("INSERT INTO orders (id, user_id) VALUES (1, 999);").unwrap())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "foreign key constraint fails on `orders`"
+        );
+
+        execute_sql(
+            &database,
+            "INSERT INTO users (id, name) VALUES (1, 'Alice');",
+        );
+        execute_sql(&database, "INSERT INTO users (id, name) VALUES (2, 'Bob');");
+        execute_sql(&database, "INSERT INTO orders (id, user_id) VALUES (1, 1);");
+        let error = database
+            .execute(parse_statement("UPDATE orders SET user_id = 999 WHERE id = 1;").unwrap())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "foreign key constraint fails on `orders`"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn foreign_key_restricts_parent_delete_and_drop_by_default() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY);");
+        execute_sql(
+            &database,
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, FOREIGN KEY (user_id) REFERENCES users (id));",
+        );
+        execute_sql(&database, "INSERT INTO users (id) VALUES (1);");
+        execute_sql(&database, "INSERT INTO orders (id, user_id) VALUES (1, 1);");
+
+        let error = database
+            .execute(parse_statement("DELETE FROM users WHERE id = 1;").unwrap())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cannot delete from `users` because it is referenced by `orders`"
+        );
+        let error = database
+            .execute(parse_statement("DROP TABLE users;").unwrap())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cannot drop table `users` because it is referenced by `orders`"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn foreign_key_cascades_delete_and_update() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY);");
+        execute_sql(
+            &database,
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, CONSTRAINT fk_orders_users FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE ON UPDATE CASCADE);",
+        );
+        execute_sql(&database, "INSERT INTO users (id) VALUES (1), (2);");
+        execute_sql(
+            &database,
+            "INSERT INTO orders (id, user_id) VALUES (10, 1), (20, 2);",
+        );
+
+        assert_eq!(
+            execute_sql(&database, "UPDATE users SET id = 3 WHERE id = 1;"),
+            "updated 1 row(s) in `users`"
+        );
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM orders ORDER BY id;"),
+            "id\tuser_id\n10\t3\n20\t2"
+        );
+        assert_eq!(
+            execute_sql(&database, "DELETE FROM users WHERE id = 2;"),
+            "deleted 1 row(s) from `users`"
+        );
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM orders ORDER BY id;"),
+            "id\tuser_id\n10\t3"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn foreign_key_sets_null_on_parent_delete() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(&database, "CREATE TABLE users (id INT PRIMARY KEY);");
+        execute_sql(
+            &database,
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL);",
+        );
+        execute_sql(&database, "INSERT INTO users (id) VALUES (1);");
+        execute_sql(
+            &database,
+            "INSERT INTO orders (id, user_id) VALUES (10, 1);",
+        );
+
+        execute_sql(&database, "DELETE FROM users WHERE id = 1;");
+        assert_eq!(
+            execute_sql(&database, "SELECT * FROM orders;"),
+            "id\tuser_id\n10\t"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1908,6 +2078,43 @@ mod tests {
             execute_sql(&database, "TRUNCATE TABLE users;"),
             "deleted 1 row(s) from `users`"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn laravel_generated_ddl_is_supported() {
+        let root = test_dir();
+        let database = Database::new(&root);
+        execute_sql(
+            &database,
+            "CREATE TABLE `users` (`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, `email` VARCHAR(255) NOT NULL) DEFAULT CHARACTER SET utf8mb4 COLLATE 'utf8mb4_unicode_ci';",
+        );
+        execute_sql(
+            &database,
+            "ALTER TABLE `users` ADD UNIQUE `users_email_unique`(`email`);",
+        );
+        execute_sql(
+            &database,
+            "ALTER TABLE `users` ADD INDEX `users_id_index`(`id`);",
+        );
+        execute_sql(
+            &database,
+            "INSERT INTO users (email) VALUES ('a@example.com');",
+        );
+        let error = database
+            .execute(
+                parse_statement("INSERT INTO users (email) VALUES ('a@example.com');").unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "duplicate value `a@example.com` for key `email`"
+        );
+        assert!(database.table_exists("users").unwrap());
+        execute_sql(&database, "CREATE TABLE roles (id INT);");
+        execute_sql(&database, "DROP TABLE users, roles;");
+        execute_sql(&database, "DROP TABLE IF EXISTS users;");
+        assert!(!database.table_exists("users").unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 }

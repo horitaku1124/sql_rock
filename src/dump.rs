@@ -1,5 +1,5 @@
 use crate::error::{Result, SqlRockError};
-use crate::model::Table;
+use crate::model::{ForeignKey, ReferentialAction, Table};
 use crate::storage::parse_table_file;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,10 +25,14 @@ impl Default for DumpOptions {
 
 pub fn dump_directory(data_dir: &Path, options: &DumpOptions) -> Result<String> {
     let table_paths = selected_table_paths(data_dir, &options.tables)?;
+    let mut tables = table_paths
+        .into_iter()
+        .map(|path| parse_table_file(&fs::read_to_string(path)?))
+        .collect::<Result<Vec<_>>>()?;
+    sort_tables_by_foreign_key_dependencies(&mut tables);
     let mut statements = Vec::new();
 
-    for path in table_paths {
-        let table = parse_table_file(&fs::read_to_string(path)?)?;
+    for table in tables {
         append_table_dump(&mut statements, &table, options);
     }
 
@@ -37,6 +41,30 @@ pub fn dump_directory(data_dir: &Path, options: &DumpOptions) -> Result<String> 
     } else {
         Ok(format!("{}\n", statements.join("\n\n")))
     }
+}
+
+fn sort_tables_by_foreign_key_dependencies(tables: &mut Vec<Table>) {
+    let mut remaining = std::mem::take(tables);
+    let mut sorted = Vec::new();
+    while !remaining.is_empty() {
+        let emitted_names = sorted
+            .iter()
+            .map(|table: &Table| table.name.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        let remaining_names = remaining
+            .iter()
+            .map(|table| table.name.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        let next = remaining.iter().position(|table| {
+            table.foreign_keys.iter().all(|foreign_key| {
+                let referenced = foreign_key.referenced_table.to_ascii_lowercase();
+                emitted_names.contains(&referenced) || !remaining_names.contains(&referenced)
+            })
+        });
+        let index = next.unwrap_or(0);
+        sorted.push(remaining.remove(index));
+    }
+    *tables = sorted;
 }
 
 fn selected_table_paths(data_dir: &Path, tables: &[String]) -> Result<Vec<PathBuf>> {
@@ -90,6 +118,7 @@ fn create_table_statement(table: &Table) -> String {
         .columns
         .iter()
         .map(|column| format!("{} {}", quote_identifier(&column.name), column.data_type))
+        .chain(table.foreign_keys.iter().map(format_foreign_key))
         .collect::<Vec<_>>()
         .join(",\n  ");
     let mut sql = format!(
@@ -148,6 +177,48 @@ fn quote_identifier(value: &str) -> String {
 
 fn quote_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn format_foreign_key(foreign_key: &ForeignKey) -> String {
+    let name = foreign_key
+        .name
+        .as_deref()
+        .map(|name| format!("CONSTRAINT {} ", quote_identifier(name)))
+        .unwrap_or_default();
+    let columns = foreign_key
+        .columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let referenced_columns = foreign_key
+        .referenced_columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut sql = format!(
+        "{name}FOREIGN KEY ({columns}) REFERENCES {} ({referenced_columns})",
+        quote_identifier(&foreign_key.referenced_table)
+    );
+    if foreign_key.on_delete != ReferentialAction::Restrict {
+        sql.push_str(" ON DELETE ");
+        sql.push_str(referential_action_sql(foreign_key.on_delete));
+    }
+    if foreign_key.on_update != ReferentialAction::Restrict {
+        sql.push_str(" ON UPDATE ");
+        sql.push_str(referential_action_sql(foreign_key.on_update));
+    }
+    sql
+}
+
+fn referential_action_sql(action: ReferentialAction) -> &'static str {
+    match action {
+        ReferentialAction::Restrict => "RESTRICT",
+        ReferentialAction::Cascade => "CASCADE",
+        ReferentialAction::SetNull => "SET NULL",
+        ReferentialAction::NoAction => "NO ACTION",
+    }
 }
 
 fn validate_table_name(value: &str) -> Result<()> {
@@ -242,5 +313,39 @@ mod tests {
         );
 
         fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn dumps_foreign_key_tables_in_restorable_order() {
+        let source_dir = test_dir("foreign_key_source");
+        let restore_dir = test_dir("foreign_key_restore");
+        let source = Database::new(&source_dir);
+        execute(&source, "CREATE TABLE users (id INT PRIMARY KEY);");
+        execute(
+            &source,
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE);",
+        );
+        execute(&source, "INSERT INTO users (id) VALUES (1);");
+        execute(&source, "INSERT INTO orders (id, user_id) VALUES (10, 1);");
+
+        let sql = dump_directory(&source_dir, &DumpOptions::default()).unwrap();
+        assert!(sql.find("CREATE TABLE `users`") < sql.find("CREATE TABLE `orders`"));
+        assert!(
+            sql.contains("FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE")
+        );
+
+        let restored = Database::new(&restore_dir);
+        for statement in split_statements(&sql) {
+            execute(&restored, &statement);
+        }
+        assert_eq!(
+            restored
+                .execute(parse_statement("SELECT * FROM orders;").unwrap())
+                .unwrap(),
+            "id\tuser_id\n10\t1"
+        );
+
+        fs::remove_dir_all(source_dir).unwrap();
+        fs::remove_dir_all(restore_dir).unwrap();
     }
 }
